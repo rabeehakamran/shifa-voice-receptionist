@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shifa Desk · Call Hina</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main class="call">
+  <header>
+    <div class="brand">🏥 Shifa Family Clinic</div>
+    <a href="/dashboard" class="link">Owner dashboard →</a>
+  </header>
+
+  <section class="phone">
+    <div id="avatar" class="avatar idle">H</div>
+    <h1>Hina</h1>
+    <p class="sub">AI receptionist · Urdu / English</p>
+    <div id="status" class="status">Ready</div>
+    <div class="controls">
+      <input id="phone" value="03001234567" aria-label="Your phone number">
+      <button id="callBtn" class="btn green">📞 Call</button>
+      <button id="hangBtn" class="btn red" disabled>Hang up</button>
+    </div>
+    <div id="emergency" class="emergency hidden">🚨 Emergency detected: caller told to dial 1122, doctor alerted</div>
+  </section>
+
+  <section id="log" class="log"></section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/ort.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.22/dist/bundle.min.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+let ws = null, mic = null, queue = [], playing = null;
+
+function setStatus(text, mode) {
+  $("status").textContent = text;
+  $("avatar").className = "avatar " + (mode || "idle");
+}
+
+function bubble(who, text, meta) {
+  const div = document.createElement("div");
+  div.className = "bubble " + who;
+  div.dir = /[؀-ۿ]/.test(text) ? "rtl" : "ltr";
+  div.textContent = text;
+  if (meta) {
+    const m = document.createElement("div");
+    m.className = "meta";
+    m.textContent = meta;
+    div.appendChild(m);
+  }
+  $("log").appendChild(div);
+  $("log").scrollTop = $("log").scrollHeight;
+  return div;
+}
+
+// ---- audio playback queue (one MP3 per sentence) ----
+function playNext() {
+  if (playing || !queue.length) { if (!playing) setStatus("Listening…", "listening"); return; }
+  const url = URL.createObjectURL(queue.shift());
+  playing = new Audio(url);
+  setStatus("Hina is speaking…", "speaking");
+  playing.onended = () => { URL.revokeObjectURL(url); playing = null; playNext(); };
+  playing.play();
+}
+function stopAudio() {  // barge-in
+  queue = [];
+  if (playing) { playing.pause(); playing = null; }
+}
+
+let lastReply = null;
+function onMessage(ev) {
+  if (ev.data instanceof Blob) { queue.push(ev.data); playNext(); return; }
+  const msg = JSON.parse(ev.data);
+  if (msg.type === "transcript") { bubble("caller", msg.text); setStatus("Thinking…", "thinking"); }
+  if (msg.type === "filler") setStatus("Checking…", "thinking");
+  if (msg.type === "reply") {
+    lastReply = bubble("agent", msg.text, msg.route ? `${msg.route}${msg.risk && msg.risk !== "none" ? " · " + msg.risk : ""}` : "");
+    if (msg.escalated) $("emergency").classList.remove("hidden");
+  }
+  if (msg.type === "timings" && lastReply) {
+    const t = msg.timings;
+    lastReply.querySelector(".meta").textContent += `  ·  STT ${t.stt}ms · TTS ${t.tts_first_audio}ms · voice→voice ${t.voice_to_voice}ms`;
+  }
+  if (msg.type === "ended") bubble("system", `Call ended · ${msg.outcome}: ${msg.summary}`);
+}
+
+$("callBtn").onclick = async () => {
+  $("callBtn").disabled = true;
+  setStatus("Connecting…", "thinking");
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/call`);
+  ws.onmessage = onMessage;
+  ws.onclose = () => { setStatus("Call ended"); $("hangBtn").disabled = true; $("callBtn").disabled = false; };
+  ws.onopen = async () => {
+    ws.send(JSON.stringify({ type: "start", phone: $("phone").value }));
+    mic = await vad.MicVAD.new({
+      positiveSpeechThreshold: 0.8,
+      redemptionFrames: 10,               // ~0.6 s of silence ends the turn
+      onSpeechStart: () => { stopAudio(); setStatus("Listening…", "listening"); },
+      onSpeechEnd: (audio) => {
+        setStatus("Transcribing…", "thinking");
+        ws.send(vad.utils.encodeWAV(audio));   // 16 kHz mono WAV
+      },
+    });
+    mic.start();
+    $("hangBtn").disabled = false;
+  };
+};
+
+$("hangBtn").onclick = () => {
+  if (mic) mic.pause();
+  stopAudio();
+  ws.send(JSON.stringify({ type: "hangup" }));
+};
+</script>
+</body>
+</html>

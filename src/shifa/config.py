@@ -1,0 +1,62 @@
+from datetime import date, datetime, time
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+ROOT = Path(__file__).resolve().parents[2]
+DATA_DIR = ROOT / "data"
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=ROOT / ".env", env_prefix="SHIFA_", extra="ignore")
+
+    groq_api_key: str = ""
+    google_api_key: str = ""
+
+    # Two tiers: "fast" for routing/classification, "smart" for agents that talk and call tools.
+    # Check what your key can use with Groq().models.list(); the public docs list more than accounts get.
+    fast_model: str = "openai/gpt-oss-20b"
+    smart_model: str = "openai/gpt-oss-120b"
+    # Free-tier Gemini quotas are per model (3.6-flash: 5 RPM / 20 per day), so spread the load:
+    gemini_model: str = "gemini-3.1-flash-lite"  # agent fallback (rarely used)
+    sim_model: str = "gemini-3.5-flash-lite"  # eval caller simulator
+    judge_model: str = "gemini-3.1-flash-lite"  # eval judge
+    use_ollama: bool = False
+    ollama_model: str = "qwen2.5:3b"
+
+    db_path: Path = DATA_DIR / "shifa.db"
+    checkpoint_path: Path = DATA_DIR / "checkpoints.db"
+    chroma_path: Path = DATA_DIR / "chroma"
+    kb_dir: Path = DATA_DIR / "clinic_kb"
+    embedding_model: str = "gemini-embedding-2"
+
+    # Pinning "today" makes evals reproducible; empty means the real date.
+    today: date | None = None
+
+
+class Keys(BaseSettings):
+    """API keys use their standard un-prefixed env names."""
+
+    model_config = SettingsConfigDict(env_file=ROOT / ".env", extra="ignore")
+    groq_api_key: str = ""
+    google_api_key: str = ""
+
+
+@lru_cache
+def get_settings() -> Settings:
+    s = Settings()
+    keys = Keys()
+    s.groq_api_key = s.groq_api_key or keys.groq_api_key
+    s.google_api_key = s.google_api_key or keys.google_api_key
+    return s
+
+
+def clinic_today() -> date:
+    return get_settings().today or date.today()
+
+
+def clinic_now() -> datetime:
+    """With a pinned date, pretend it's 8 AM (before opening) so every slot that day is bookable."""
+    pinned = get_settings().today
+    return datetime.combine(pinned, time(8)) if pinned else datetime.now()

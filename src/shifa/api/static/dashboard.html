@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shifa Desk · Owner dashboard</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main class="dash">
+  <header>
+    <div class="brand">🏥 Shifa Desk · Owner dashboard</div>
+    <a href="/call" class="link">Test a call →</a>
+  </header>
+
+  <section class="stats" id="stats"></section>
+
+  <section class="grid">
+    <div class="panel">
+      <h2>Recent calls</h2>
+      <div id="calls" class="list"></div>
+    </div>
+    <div class="panel">
+      <h2 id="detailTitle">Call transcript</h2>
+      <div id="detail" class="list muted">Select a call</div>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="panel">
+      <h2>Inbox <span class="hint">answer an unanswered question once → Hina knows it next time</span></h2>
+      <div id="inbox" class="list"></div>
+    </div>
+    <div class="panel">
+      <h2>Upcoming appointments</h2>
+      <table id="appts"></table>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const get = (u) => fetch(u).then((r) => r.json());
+const time = (iso) => new Date(iso).toLocaleString("en-PK", { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+let selected = null;
+
+async function loadStats() {
+  const s = await get("/api/stats");
+  const learned = s.unanswered_total ? `${s.unanswered_resolved}/${s.unanswered_total}` : "0";
+  const cards = [
+    ["Calls handled", s.calls], ["Booked", s.outcomes.booked || 0], ["Escalations", s.escalations],
+    ["Open inbox", s.open_inbox], ["KB answers learned", learned],
+    ["Agent p50", s.latency_ms.agent_p50 ? `${Math.round(s.latency_ms.agent_p50)} ms` : "–"],
+    ["Voice→voice p50", s.latency_ms.voice_to_voice_p50 ? `${Math.round(s.latency_ms.voice_to_voice_p50)} ms` : "–"],
+  ];
+  $("stats").innerHTML = cards.map(([k, v]) => `<div class="stat"><div class="v">${esc(v)}</div><div class="k">${esc(k)}</div></div>`).join("");
+}
+
+async function loadCalls() {
+  const calls = await get("/api/calls");
+  $("calls").innerHTML = calls.map((c) => `
+    <div class="item ${c.id === selected ? "sel" : ""} ${c.escalated ? "danger" : ""}" onclick="openCall('${c.id}')">
+      <div class="row"><b>${esc(c.phone)}</b><span class="tag">${esc(c.outcome || "in progress")}</span></div>
+      <div class="small">${time(c.started_at)} · ${esc(c.channel)} · ${esc(c.sentiment)}</div>
+      <div>${esc(c.summary)}</div>
+    </div>`).join("") || `<div class="muted">No calls yet</div>`;
+}
+
+async function openCall(id) {
+  selected = id;
+  const { call, turns } = await get(`/api/calls/${id}`);
+  $("detailTitle").textContent = `Call ${call.phone} · ${call.outcome || "in progress"}`;
+  $("detail").classList.remove("muted");
+  $("detail").innerHTML = turns.map((t) => {
+    const timing = t.role === "agent" ? Object.entries(t.timings_ms).map(([k, v]) => `${k} ${v}ms`).join(" · ") : "";
+    const rtl = /[؀-ۿ]/.test(t.text) ? 'dir="rtl"' : "";
+    return `<div class="bubble ${t.role === "caller" ? "caller" : "agent"}" ${rtl}>${esc(t.text)}
+      ${t.role === "agent" ? `<div class="meta">${esc(t.route)} · ${esc(timing)}</div>` : ""}</div>`;
+  }).join("");
+  loadCalls();
+}
+
+async function loadInbox() {
+  const items = await get("/api/inbox");
+  $("inbox").innerHTML = items.map((i) => `
+    <div class="item ${i.kind === "emergency" ? "danger" : ""}">
+      <div class="row"><span class="tag ${i.kind}">${esc(i.kind)}</span><span class="small">${esc(i.phone)} · ${time(i.created_at)}</span></div>
+      <div>${esc(i.text)}</div>
+      ${i.status === "resolved" ? `<div class="small ok">✓ ${esc(i.answer || "resolved")}</div>` :
+        i.kind === "unanswered" ? `<div class="answer"><input id="ans${i.id}" placeholder="Type the answer for Hina…"><button class="btn green" onclick="answer(${i.id})">Teach</button></div>` :
+        `<button class="btn" onclick="answer(${i.id}, 'done')">Mark done</button>`}
+    </div>`).join("") || `<div class="muted">Inbox empty</div>`;
+}
+
+async function answer(id, fixed) {
+  const text = fixed || $(`ans${id}`).value.trim();
+  if (!text) return;
+  await fetch(`/api/inbox/${id}/answer`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answer: text }) });
+  loadInbox(); loadStats();
+}
+
+async function loadAppts() {
+  const a = await get("/api/appointments");
+  $("appts").innerHTML = `<tr><th>When</th><th>Patient</th><th>Doctor</th><th>Reason</th></tr>` +
+    a.map((x) => `<tr><td>${time(x.start)}</td><td>${esc(x.patient)}<div class="small">${esc(x.phone)}</div></td><td>${esc(x.doctor)}</td><td>${esc(x.reason)}</td></tr>`).join("");
+}
+
+function refresh() { loadStats(); loadCalls(); loadInbox(); loadAppts(); if (selected) openCall(selected); }
+refresh();
+setInterval(() => { loadStats(); loadCalls(); loadAppts(); }, 4000);
+</script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+[project]
+name = "shifa-desk"
+version = "0.1.0"
+description = "Multi-agent Urdu/English AI voice receptionist for a GP clinic, with a caller-simulator eval arena"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph",
+    "langchain-core",
+    "langchain-groq",
+    "langchain-google-genai",
+    "sqlmodel",
+    "chromadb",
+    "pydantic-settings",
+    "python-dotenv",
+    "fastapi",
+    "uvicorn[standard]",
+    "pyyaml",
+    "rich",
+    "groq",
+    "edge-tts",
+]
+
+[project.optional-dependencies]
+local = ["langchain-ollama"]
+dev = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+markers = ["llm: tests that call real LLM APIs (need keys, use free-tier quota)"]
+addopts = "-m 'not llm'"
