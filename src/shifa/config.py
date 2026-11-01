@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     messaging_provider: str = "simulate"
     whatsapp_token: str = ""
     whatsapp_phone_number_id: str = ""
+    whatsapp_api_version: str = "v23.0"
+    whatsapp_mode: str = "text"  # text (inside the 24 h window, for testing) | template (approved template)
+    whatsapp_template_name: str = "appointment_update"
+    whatsapp_template_lang: str = "en"
 
 
 class Keys(BaseSettings):
