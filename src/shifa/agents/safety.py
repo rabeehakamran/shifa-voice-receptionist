@@ -53,6 +53,11 @@ _EN = re.compile(
     r"and|to|a|an|in|on|at)\b")
 
 
+_ASK_ENGLISH = re.compile(r"\b(in english|speak english|english (mein|me|main|men)|angrezi)\b|انگلش|انگلیش|انگلس|انگریزی",
+                          re.I)
+_ASK_URDU = re.compile(r"\b(in urdu|speak urdu|urdu (mein|me|main|men))\b|اردو میں", re.I)
+
+
 def detect_script(text: str, previous: str | None = None) -> str:
     """Cheap language guess: 'ur' (Urdu script), 'roman_ur', or 'en'.
 
@@ -60,6 +65,12 @@ def detect_script(text: str, previous: str | None = None) -> str:
     vs English function words. With hysteresis: once a call has a language, switching needs a margin
     of 2+, so one English-ish line ("hina baji are you drunk") doesn't flip Hina mid-call.
     """
+    # An explicit request beats every heuristic. Real failure: a caller said (transcribed in Urdu script)
+    # "I'm talking to you in English, why aren't you?" and kept getting Urdu.
+    if _ASK_ENGLISH.search(text):
+        return "en"
+    if _ASK_URDU.search(text):
+        return "ur" if re.search(r"[؀-ۿ]", text) else "roman_ur"
     if re.search(r"[؀-ۿ]", text):
         return "ur"
     low = text.lower()

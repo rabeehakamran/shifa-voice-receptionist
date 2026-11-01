@@ -72,3 +72,33 @@ def test_tools_bind_phone(engine):
     sid = first_slot_id(tools["get_available_slots"].invoke({"date": "2026-11-05"}))
     tools["book_appointment"].invoke({"slot_id": sid, "patient_name": "Ali"})
     assert "Ali" in tools["my_appointments"].invoke({})
+
+
+def test_cancel_needs_confirmation_in_a_later_turn(engine):
+    """Regression: 'cancel my appointment' once cancelled instantly without saying which one."""
+    with Session(engine) as s:
+        sid = first_slot_id(bt.get_available_slots(s, "2026-11-04"))
+        appt_id = int(re.search(r"appointment_id=(\d+)", bt.book_appointment(s, ME, sid, "Ali")).group(1))
+    turn1 = {t.name: t for t in bt.make_tools(engine, ME, call_id="c1", turn=1)["booking"]}
+    out = turn1["cancel_appointment"].invoke({"appointment_id": appt_id, "confirmed": True})
+    assert out.startswith("CONFIRMATION NEEDED") and "Ali" in out  # same-turn "confirmed" is refused
+    assert "Ali" in turn1["my_appointments"].invoke({})  # nothing changed
+    turn2 = {t.name: t for t in bt.make_tools(engine, ME, call_id="c1", turn=2)["booking"]}
+    assert turn2["cancel_appointment"].invoke({"appointment_id": appt_id, "confirmed": True}).startswith("CANCELLED")
+
+
+def test_around_time_finds_late_evening_slots(engine):
+    """Regression: only the first 6 slots were shown, so 7 PM looked unavailable."""
+    with Session(engine) as s:
+        out = bt.get_available_slots(s, "2026-11-07", doctor="usman", around_time="19:00")
+    assert "07:00 PM" in out and "to 09:40 PM" in out
+
+
+def test_confirmation_accepted_when_hina_asked_in_her_own_words(engine):
+    """Regression: the model asked "kya aap cancel karna chahenge?" without calling the tool, then the caller's
+    "ji haan" got asked again."""
+    with Session(engine) as s:
+        sid = first_slot_id(bt.get_available_slots(s, "2026-11-04"))
+        appt_id = int(re.search(r"appointment_id=(\d+)", bt.book_appointment(s, ME, sid, "Ali")).group(1))
+    tools = {t.name: t for t in bt.make_tools(engine, ME, call_id="c2", turn=3, asked_last_turn=True)["booking"]}
+    assert tools["cancel_appointment"].invoke({"appointment_id": appt_id, "confirmed": True}).startswith("CANCELLED")

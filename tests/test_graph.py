@@ -74,3 +74,13 @@ def test_outcome_comes_from_tool_results_not_llm_opinion():
     assert factual_outcome(booked, escalated=True) == "escalated"
     assert factual_outcome(msg, escalated=False) == "message_taken"
     assert factual_outcome(looked, escalated=False) is None  # only browsing slots is NOT a booking
+
+
+def test_outcome_uses_last_action():
+    from langchain_core.messages import ToolMessage
+
+    from shifa.session import factual_outcome
+
+    msgs = [ToolMessage("BOOKED appointment_id=3", tool_call_id="1", name="book_appointment"),
+            ToolMessage("CANCELLED appointment_id=3", tool_call_id="2", name="cancel_appointment")]
+    assert factual_outcome(msgs, escalated=False) == "cancelled"

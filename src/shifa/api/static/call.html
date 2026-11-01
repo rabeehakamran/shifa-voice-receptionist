@@ -23,6 +23,19 @@
       <button id="callBtn" class="btn green">📞 Call</button>
       <button id="hangBtn" class="btn red" disabled>Hang up</button>
     </div>
+    <div id="micPanel" class="mic hidden">
+      <div class="meter" title="Your mic level. Sound left of the line is filtered out.">
+        <div id="meterFill" class="fill"></div><div id="meterMark" class="mark"></div>
+      </div>
+      <div class="mic-row small">
+        <span>hears more</span>
+        <input id="sens" type="range" min="-12" max="12" step="1" value="0" aria-label="Background filter">
+        <span>ignores more</span>
+      </div>
+      <div id="gateInfo" class="small muted">Learning your voice level…</div>
+      <label class="mic-row small"><input id="ptt" type="checkbox"> Push-to-talk: hold <b>Space</b> or the button (best for noisy homes)</label>
+      <button id="pttBtn" class="btn hidden">🎙️ Hold to talk</button>
+    </div>
     <div id="emergency" class="emergency hidden">🚨 Emergency detected: caller told to dial 1122, doctor alerted</div>
   </section>
 
@@ -33,7 +46,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.22/dist/bundle.min.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
-let ws = null, mic = null, queue = [], playing = null;
+let ws = null, mic = null;
 
 function setStatus(text, mode) {
   $("status").textContent = text;
@@ -56,27 +69,173 @@ function bubble(who, text, meta) {
   return div;
 }
 
-// ---- audio playback queue (one MP3 per sentence) ----
-function playNext() {
-  if (playing || !queue.length) { if (!playing) setStatus("Listening…", "listening"); return; }
-  const url = URL.createObjectURL(queue.shift());
-  playing = new Audio(url);
-  setStatus("Hina is speaking…", "speaking");
-  playing.onended = () => { URL.revokeObjectURL(url); playing = null; playNext(); };
-  playing.play();
-}
-function stopAudio() {  // barge-in
-  queue = [];
-  if (playing) { playing.pause(); playing = null; }
+// ---- streaming audio: each clip (audio_start .. chunks .. audio_end) plays WHILE it downloads ----
+// MediaSource lets playback start at the first MP3 chunk (~1 s) instead of after a whole sentence (3-5 s for
+// long Urdu replies). Falls back to play-when-complete if the browser can't stream MP3.
+const CAN_STREAM = !!(window.MediaSource && MediaSource.isTypeSupported("audio/mpeg"));
+
+class Clip {
+  constructor() {
+    this.chunks = []; this.received = 0; this.done = false; this.stopped = false; this.finished = false;
+    this.audio = new Audio();
+    if (CAN_STREAM) {
+      this.ms = new MediaSource();
+      this.audio.src = URL.createObjectURL(this.ms);
+      this.ms.addEventListener("sourceopen", () => {
+        this.sb = this.ms.addSourceBuffer("audio/mpeg");
+        this.sb.addEventListener("updateend", () => this.pump());
+        this.pump();
+      }, { once: true });
+    }
+  }
+  push(buf) {
+    if (this.stopped) return;
+    this.chunks.push(buf); this.received++;
+    if (CAN_STREAM) this.pump();
+  }
+  end() {
+    this.done = true;
+    if (this.received === 0) return this.finish();          // nothing to play (e.g. TTS failed)
+    if (CAN_STREAM) this.pump();
+    else { this.audio.src = URL.createObjectURL(new Blob(this.chunks, { type: "audio/mpeg" })); if (this.playing) this.audio.play(); }
+  }
+  pump() {
+    if (!this.sb || this.sb.updating || this.stopped) return;
+    if (this.chunks.length) this.sb.appendBuffer(this.chunks.shift());
+    else if (this.done && this.ms.readyState === "open") this.ms.endOfStream();
+  }
+  play(onFinished) {
+    this.onFinished = onFinished; this.playing = true;
+    this.audio.onended = () => this.finish();
+    if (this.done && this.received === 0) return this.finish();
+    if (CAN_STREAM || this.done) this.audio.play().catch(() => {});
+  }
+  finish() { if (!this.finished) { this.finished = true; if (this.onFinished) this.onFinished(); } }
+  stop() { this.stopped = true; this.audio.pause(); this.chunks = []; }
 }
 
-let lastReply = null;
+// ---- adaptive noise gate: the caller is close to the mic, family in the next room is not ----
+// The VAD only asks "is this speech?", and a sister talking next door IS speech. Loudness separates them:
+// audio below the threshold is silenced BEFORE the VAD hears it, so distant talk can't start or prolong a turn.
+class NoiseGate {
+  constructor(rawStream) {
+    this.ctx = new AudioContext();
+    this.raw = rawStream;
+    const src = this.ctx.createMediaStreamSource(rawStream);
+    this.analyser = this.ctx.createAnalyser();
+    this.analyser.fftSize = 1024;                       // ~20 ms windows
+    this.gain = this.ctx.createGain();
+    this.gain.gain.value = 0;
+    const dest = this.ctx.createMediaStreamDestination();
+    src.connect(this.analyser); src.connect(this.gain); this.gain.connect(dest);
+    this.stream = dest.stream;                          // what the VAD listens to
+    this.buf = new Float32Array(this.analyser.fftSize);
+    this.floor = -60;          // background level (dB), tracked while the gate is closed
+    this.callerLevel = null;   // the caller's own speech level, learned from accepted segments
+    this.offset = 0;           // user's slider: + ignores more, - hears more
+    this.forced = null;        // push-to-talk: true while held, false otherwise; null = automatic
+    this.open = false; this.lastLoud = 0; this.level = -100;
+    this.timer = setInterval(() => this.tick(), 20);
+  }
+  threshold() {
+    let t = this.floor + 15;
+    if (this.callerLevel !== null) {
+      // ~15 dB under the caller's voice, never closer than 6 dB to it, never under the noise floor + 6
+      t = Math.min(Math.max(this.floor + 6, this.callerLevel - 15), this.callerLevel - 6);
+    }
+    return t + this.offset;
+  }
+  tick() {
+    this.analyser.getFloatTimeDomainData(this.buf);
+    let s = 0;
+    for (let i = 0; i < this.buf.length; i++) s += this.buf[i] * this.buf[i];
+    this.level = 10 * Math.log10(s / this.buf.length + 1e-10);
+    const now = performance.now();
+    if (this.level > this.threshold()) this.lastLoud = now;
+    else if (!this.open) this.floor = 0.995 * this.floor + 0.005 * this.level;  // slow (~4 s) floor tracking
+    // Hold open 350 ms after the last loud moment so quiet consonants and short pauses aren't chopped.
+    const shouldOpen = this.forced !== null ? this.forced : now - this.lastLoud < 350;
+    if (shouldOpen !== this.open) {
+      this.open = shouldOpen;
+      this.gain.gain.setTargetAtTime(shouldOpen ? 1 : 0, this.ctx.currentTime, shouldOpen ? 0.005 : 0.05);
+    }
+    drawMeter(this);
+  }
+  learn(segment) {  // 16 kHz Float32Array of an accepted utterance
+    const frame = 480, levels = [];
+    for (let i = 0; i + frame <= segment.length; i += frame) {
+      let s = 0;
+      for (let j = i; j < i + frame; j++) s += segment[j] * segment[j];
+      const db = 10 * Math.log10(s / frame + 1e-10);
+      if (db > -80) levels.push(db);                    // skip the gated (silent) parts
+    }
+    if (levels.length < 5) return;
+    levels.sort((a, b) => a - b);
+    const lvl = levels[Math.floor(levels.length * 0.8)]; // loud-ish part of the voice, robust to pauses
+    this.callerLevel = this.callerLevel === null ? lvl : 0.7 * this.callerLevel + 0.3 * lvl;
+    $("gateInfo").textContent = `Your voice ≈ ${Math.round(this.callerLevel)} dB · ignoring sounds under ${Math.round(this.threshold())} dB`;
+  }
+  close() { clearInterval(this.timer); this.ctx.close(); this.raw.getTracks().forEach((t) => t.stop()); }
+}
+
+function drawMeter(g) {
+  const pct = (db) => Math.max(0, Math.min(100, ((db + 70) / 60) * 100));  // -70..-10 dB -> 0..100%
+  $("meterFill").style.width = pct(g.level) + "%";
+  $("meterFill").classList.toggle("open", g.open);
+  $("meterMark").style.left = pct(g.threshold()) + "%";
+}
+
+let gate = null;
+$("sens").oninput = () => { if (gate) gate.offset = Number($("sens").value); };
+
+// Push-to-talk: like a WhatsApp voice note. The gate only opens while held; releasing ends the turn at once.
+function pttDown() {
+  if (!gate || gate.forced !== false) return;
+  stopAudio(); gate.forced = true; $("pttBtn").classList.add("held"); setStatus("Listening…", "listening");
+}
+function pttUp() {
+  if (!gate || gate.forced !== true) return;
+  gate.forced = false; $("pttBtn").classList.remove("held");
+  if (mic) { mic.pause(); mic.start(); }  // pause() submits the held speech right away (submitUserSpeechOnPause)
+}
+$("ptt").onchange = () => {
+  const on = $("ptt").checked;
+  $("pttBtn").classList.toggle("hidden", !on);
+  if (gate) gate.forced = on ? false : null;
+};
+$("pttBtn").onpointerdown = pttDown;
+$("pttBtn").onpointerup = $("pttBtn").onpointerleave = pttUp;
+document.addEventListener("keydown", (e) => { if (e.code === "Space" && !e.repeat && $("ptt").checked && e.target.tagName !== "INPUT") { e.preventDefault(); pttDown(); } });
+document.addEventListener("keyup", (e) => { if (e.code === "Space" && $("ptt").checked) { e.preventDefault(); pttUp(); } });
+
+let clips = [], receiving = null;
+function startNext() {
+  if (!clips.length) { setStatus("Listening…", "listening"); return; }
+  setStatus("Hina is speaking…", "speaking");
+  clips[0].play(() => { clips.shift(); startNext(); });
+}
+function stopAudio() {  // barge-in
+  clips.forEach((c) => c.stop());
+  clips = [];
+}
+
+let lastReply = null, openCaller = null;
 function onMessage(ev) {
-  if (ev.data instanceof Blob) { queue.push(ev.data); playNext(); return; }
+  if (ev.data instanceof ArrayBuffer) { if (receiving) receiving.push(ev.data); return; }
   const msg = JSON.parse(ev.data);
-  if (msg.type === "transcript") { bubble("caller", msg.text); setStatus("Thinking…", "thinking"); }
+  if (msg.type === "audio_start") { receiving = new Clip(); clips.push(receiving); if (clips.length === 1) startNext(); }
+  if (msg.type === "audio_end" && receiving) { receiving.end(); receiving = null; }
+  if (msg.type === "transcript") {
+    // Segments of one sentence (split by a pause) are joined server-side; update the same bubble.
+    if (openCaller) { openCaller.textContent = msg.text; openCaller.dir = /[؀-ۿ]/.test(msg.text) ? "rtl" : "ltr"; }
+    else openCaller = bubble("caller", msg.text);
+    setStatus("Thinking…", "thinking");
+  }
+  if (msg.type === "waiting") setStatus("Listening… (go on)", "listening");
   if (msg.type === "filler") setStatus("Checking…", "thinking");
+  if (msg.type === "ignored" && !clips.length) setStatus("Listening…", "listening");
   if (msg.type === "reply") {
+    openCaller = null;
     lastReply = bubble("agent", msg.text, msg.route ? `${msg.route}${msg.risk && msg.risk !== "none" ? " · " + msg.risk : ""}` : "");
     if (msg.escalated) $("emergency").classList.remove("hidden");
   }
@@ -91,16 +250,41 @@ $("callBtn").onclick = async () => {
   $("callBtn").disabled = true;
   setStatus("Connecting…", "thinking");
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/call`);
+  ws.binaryType = "arraybuffer";  // audio chunks go straight into the MediaSource buffer
   ws.onmessage = onMessage;
-  ws.onclose = () => { setStatus("Call ended"); $("hangBtn").disabled = true; $("callBtn").disabled = false; };
+  ws.onclose = () => {
+    setStatus("Call ended"); $("hangBtn").disabled = true; $("callBtn").disabled = false;
+    if (mic) { mic.destroy(); mic = null; }
+    if (gate) { gate.close(); gate = null; }
+    $("micPanel").classList.add("hidden");
+  };
   ws.onopen = async () => {
     ws.send(JSON.stringify({ type: "start", phone: $("phone").value }));
+    // Browser DSP removes Hina's own voice from the mic (speakers -> mic echo caused fake barge-ins and
+    // phantom transcripts) and steady background noise. Headphones help even more.
+    // autoGainControl is OFF on purpose: AGC boosts quiet sound, which would lift distant voices to the caller's
+    // level and defeat the loudness gate.
+    const constraints = { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: false };
+    const raw = await navigator.mediaDevices.getUserMedia({ audio: constraints });
+    gate = new NoiseGate(raw);
+    if ($("ptt").checked) gate.forced = false;
+    $("micPanel").classList.remove("hidden");
+    let bargeTimer = null;
     mic = await vad.MicVAD.new({
-      positiveSpeechThreshold: 0.8,
-      redemptionFrames: 10,               // ~0.6 s of silence ends the turn
-      onSpeechStart: () => { stopAudio(); setStatus("Listening…", "listening"); },
+      stream: gate.stream,              // the VAD hears the GATED audio, not the raw mic
+      submitUserSpeechOnPause: true,    // push-to-talk release ends the turn immediately
+      // One frame = 1536 samples at 16 kHz = 96 ms.
+      positiveSpeechThreshold: 0.75,   // high: background noise shouldn't start a turn
+      negativeSpeechThreshold: 0.4,    // low: quiet speech mid-sentence still counts as speech
+      redemptionFrames: 14,            // ~1.3 s of silence ends a segment (was ~1 s: cut people off mid-sentence)
+      minSpeechFrames: 5,              // ignore blips shorter than ~0.5 s (coughs, clicks)
+      preSpeechPadFrames: 3,           // keep ~0.3 s before speech so first syllables aren't clipped
+      // Barge-in only after 300 ms of real speech, so a cough or echo doesn't cut Hina off.
+      onSpeechStart: () => { setStatus("Listening…", "listening"); bargeTimer = setTimeout(stopAudio, 300); },
+      onVADMisfire: () => clearTimeout(bargeTimer),
       onSpeechEnd: (audio) => {
         setStatus("Transcribing…", "thinking");
+        gate.learn(audio);                     // adapt the threshold to this caller's voice
         ws.send(vad.utils.encodeWAV(audio));   // 16 kHz mono WAV
       },
     });
@@ -110,7 +294,7 @@ $("callBtn").onclick = async () => {
 };
 
 $("hangBtn").onclick = () => {
-  if (mic) mic.pause();
+  if (mic) { mic.destroy(); mic = null; }  // destroy, not pause: pause() would submit half a sentence
   stopAudio();
   ws.send(JSON.stringify({ type: "hangup" }));
 };

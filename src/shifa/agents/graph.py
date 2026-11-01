@@ -219,8 +219,17 @@ def _tool_loop(system: str, state: CallState, tools: list) -> list[AnyMessage]:
     return new
 
 
+# Must be about confirming/cancelling/moving. NOT any question: after "kaun sa time?" a caller's "cancel kar do"
+# must still get a confirmation question first.
+_ASKS_CONFIRM = re.compile(r"تصدیق|کنفرم|confirm|pakka|پکا|کینسل|منسوخ|cancel|reschedule|شفٹ|shift", re.I)
+
+
 def _tools(state: CallState, config: RunnableConfig):
-    return make_tools(_engine(config), state["phone"], state.get("call_id"))
+    turn = sum(isinstance(m, HumanMessage) and not m.text.startswith("(system:") for m in state["messages"])
+    # Did Hina's previous spoken reply (before this caller turn) ask the caller to confirm something?
+    spoken = [m for m in state["messages"][:-1] if isinstance(m, AIMessage) and m.text and not m.tool_calls]
+    asked = bool(spoken) and bool(_ASKS_CONFIRM.search(spoken[-1].text))
+    return make_tools(_engine(config), state["phone"], state.get("call_id"), turn=turn, asked_last_turn=asked)
 
 
 @timed("booking")

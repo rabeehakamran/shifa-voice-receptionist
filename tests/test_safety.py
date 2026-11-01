@@ -54,5 +54,11 @@ def test_language_is_sticky_on_ambiguous_turns():
     assert detect_script("hina baji are you drunk", previous="roman_ur") == "roman_ur"
 
 
+def test_explicit_language_request_wins():
+    # Verbatim from a voice test: English speech that Whisper wrote in Urdu script.
+    assert detect_script("میں آپ کو انگلیش میں بات کر رہا ہوں کیوں آپ انگلیش میں نہیں بات کر رہے ہیں؟", "ur") == "en"
+    assert detect_script("please urdu mein baat karein", previous="en") == "roman_ur"
+
+
 def test_language_switches_with_clear_margin():
     assert detect_script("I want to book an appointment for my son please", previous="roman_ur") == "en"

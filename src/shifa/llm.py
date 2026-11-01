@@ -38,7 +38,12 @@ def _models(tier: Tier, temperature: float) -> tuple[BaseChatModel, ...]:
         # gpt-oss models reason before answering; on a phone call latency beats depth.
         extra = {"reasoning_effort": "low"} if "gpt-oss" in name else {}
         models.append(ChatGroq(model=name, api_key=s.groq_api_key, temperature=temperature,
-                               max_retries=1, timeout=20, **extra))
+                               max_retries=0, timeout=20, **extra))
+        if tier == "smart" and s.fast_model != name:
+            # Groq rate limits are per model (8K tokens/min each), so the 20B model is a fast second chance
+            # before the much slower fall to Gemini. Seen in testing: 120B 429 -> Gemini turns of 11-33 s.
+            models.append(ChatGroq(model=s.fast_model, api_key=s.groq_api_key, temperature=temperature,
+                                   max_retries=0, timeout=20, reasoning_effort="low"))
     if s.google_api_key:
         from langchain_google_genai import ChatGoogleGenerativeAI
 

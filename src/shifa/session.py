@@ -5,6 +5,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 
 from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
@@ -34,13 +35,14 @@ class TurnResult:
     escalated: bool
     citations: list[str] = field(default_factory=list)
     timings_ms: dict = field(default_factory=dict)
+    lang: str = "en"  # the language this turn was answered in; picks the TTS voice
 
 
 class CallSummary(BaseModel):
     summary: str = Field(description="1-2 sentences in English")
     sentiment: str = Field(description="positive | neutral | negative | distressed")
     # Only used when no tool result proves the outcome (see factual_outcome).
-    outcome: str = Field(description="answered (caller got the info they wanted) | unresolved")
+    outcome: Literal["answered", "unresolved"] = Field(description="answered = caller got what they wanted")
     tags: list[str] = Field(description="2-4 short tags, e.g. fees, booking, lab, complaint")
 
 
@@ -60,10 +62,12 @@ def factual_outcome(messages: list, escalated: bool) -> str | None:
     where nothing was booked. Returns None when only the LLM can judge (answered vs unresolved)."""
     if escalated:
         return "escalated"
-    results = [m.text for m in messages if isinstance(m, ToolMessage)]
-    for prefix, outcome in (("BOOKED", "booked"), ("RESCHEDULED", "rescheduled"), ("CANCELLED", "cancelled")):
-        if any(r.startswith(prefix) for r in results):
-            return outcome
+    # The LAST state change wins: a call that booked and then cancelled was summarized as "booked".
+    actions = {"BOOKED": "booked", "RESCHEDULED": "rescheduled", "CANCELLED": "cancelled"}
+    for m in reversed([m for m in messages if isinstance(m, ToolMessage)]):
+        for prefix, outcome in actions.items():
+            if m.text.startswith(prefix):
+                return outcome
     if any(m.name == "leave_message_for_staff" for m in messages if isinstance(m, ToolMessage)):
         return "message_taken"
     return None
@@ -100,7 +104,8 @@ class CallSession:
         timings = {**state.get("timings", {}), "total": round((time.perf_counter() - t0) * 1000)}
         result = TurnResult(reply=state["messages"][-1].text, route=state.get("route", ""),
                             risk=state.get("risk", "none"), escalated=state.get("escalated", False),
-                            citations=state.get("citations", []), timings_ms=timings)
+                            citations=state.get("citations", []), timings_ms=timings,
+                            lang=state.get("lang", "en"))
         self._log(text, result)
         return result
 

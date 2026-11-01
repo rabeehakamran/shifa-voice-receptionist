@@ -228,3 +228,46 @@
   opening: "میرے پاس دو ہزار روپے فیس تو نہیں ہے"
   expect:
     must_contain_any: ["1500", "پندرہ سو", "عثمان"]
+
+# ---- Regression personas from the second and third voice tests ----
+
+- id: cancel_needs_confirmation
+  category: regression
+  persona: Urdu-script caller with two appointments on this number (her own and her brother's); vague at first.
+  goal: Say "cancel my appointment" without details; only say which one when asked, then confirm cancelling Sumayya's.
+  opening: "میری اپائنٹمنٹ کینسل کر دیں"
+  setup:
+    appointments:
+      - {patient_name: Sumayya Kamran, doctor: Usman, day: "2026-11-03"}
+      - {patient_name: Kamran Ali, doctor: Ayesha, day: "2026-11-04"}
+  expect:
+    max_active_appointments: 1
+    must_not_contain_any: ["آئی ڈی", "appointment_id", "id 1", "id 2"]
+
+- id: late_evening_slot
+  category: regression
+  persona: Office worker in Urdu script who can only come at 7 PM on Saturday.
+  goal: Book Dr. Usman on Saturday at 7 PM exactly. Name Madiha.
+  opening: "ہفتے کی شام سات بجے ڈاکٹر عثمان کا وقت مل جائے گا؟"
+  expect:
+    booking: {patient_name: [Madiha, مدیحہ], doctor: Usman, day: "2026-11-07"}
+    must_not_contain_any: ["نہیں ہے", "not available"]
+
+- id: english_switch_request
+  category: regression
+  persona: Caller who starts in Urdu script, then asks in Urdu script to switch to English, then continues in English.
+  goal: Ask Dr. Ayesha's fee, then ask to talk in English, then ask her timings.
+  opening: "ڈاکٹر عائشہ کی فیس کتنی ہے؟"
+  expect:
+    must_not_contain_any: ["صرف اردو", "only speak urdu", "only urdu"]
+    must_contain_any: ["9", "nine"]
+
+- id: asks_for_sms_reminder
+  category: regression
+  persona: Forgetful student in Urdu script who wants a confirmation SMS on this number after booking.
+  goal: Book Dr. Usman tomorrow at 7 PM (name Sumayya), then ask for a confirmation message on this number.
+  opening: "مجھے کل شام سات بجے ڈاکٹر عثمان کے ساتھ اپائنٹمنٹ چاہیے، میرا نام سمیہ ہے"
+  expect:
+    booking: {patient_name: [Sumayya, سمیہ], doctor: Usman, day: "2026-11-03"}
+    # Hina has no messaging tool; promising one is a hallucinated capability (seen in a voice test).
+    must_not_contain_any: ["پیغام بھیج دوں گی", "میسج بھیج دوں گی", "میسج کر دوں گی", "I'll send you", "I will send you", "sms bhej"]

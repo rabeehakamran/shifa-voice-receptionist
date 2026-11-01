@@ -57,13 +57,19 @@ def list_doctors(s: Session) -> str:
 
 
 def get_available_slots(s: Session, day: str, doctor: str | None = None, part_of_day: str | None = None,
-                        limit: int = 6) -> str:
+                        around_time: str | None = None, limit: int = 6) -> str:
     try:
         d = date.fromisoformat(day)
     except ValueError:
         raise BookingError(f"date must be YYYY-MM-DD, got '{day}'")
     if part_of_day and part_of_day not in PARTS_OF_DAY:
         raise BookingError(f"part_of_day must be one of {list(PARTS_OF_DAY)}")
+    target = None
+    if around_time:
+        try:
+            target = time.fromisoformat(around_time)
+        except ValueError:
+            raise BookingError(f"around_time must be HH:MM in 24h, e.g. 19:00, got '{around_time}'")
     q = (select(Slot, Doctor).join(Doctor).where(Slot.is_booked == False)  # noqa: E712
          .where(Slot.start >= datetime.combine(d, time(0)))
          .where(Slot.start <= datetime.combine(d, time(23, 59)))
@@ -76,7 +82,18 @@ def get_available_slots(s: Session, day: str, doctor: str | None = None, part_of
         rows = [(sl, doc) for sl, doc in rows if lo <= sl.start.time() < hi]
     if not rows:
         return f"No free slots on {d:%A %d %b %Y} for that request (clinic is closed on Sunday)."
-    return "\n".join(fmt_slot(sl, doc) for sl, doc in rows[:limit])
+    # Header says the full range: with only the first 6 rows, the model once told a caller that 7 PM didn't
+    # exist when Dr. Usman sees patients until 10 PM.
+    header = (f"{len(rows)} free slots for this request, from {rows[0][0].start:%I:%M %p} to "
+              f"{rows[-1][0].start:%I:%M %p}.")
+    if target:
+        minutes = target.hour * 60 + target.minute
+        rows = sorted(rows, key=lambda r: abs(r[0].start.hour * 60 + r[0].start.minute - minutes))[:limit]
+        rows.sort(key=lambda r: r[0].start)
+        header += f" Showing the {len(rows)} closest to {target:%I:%M %p}:"
+    else:
+        header += f" Showing the first {min(limit, len(rows))}:" if len(rows) > limit else ""
+    return "\n".join([header, *(fmt_slot(sl, doc) for sl, doc in rows[:limit])])
 
 
 def _active_appointments(s: Session, phone: str):
@@ -145,6 +162,38 @@ def reschedule_appointment(s: Session, phone: str, appointment_id: int, new_slot
     return f"RESCHEDULED appointment_id={appointment_id} to {fmt_slot(new_slot, doc)}"
 
 
+def describe_appointment(s: Session, phone: str, appointment_id: int) -> str:
+    appt = _own_appointment(s, phone, appointment_id)
+    slot = s.get(Slot, appt.slot_id)
+    return f"{appt.patient_name} with {s.get(Doctor, slot.doctor_id).name} on {slot.start:%a %d %b, %I:%M %p}"
+
+
+class ConfirmationGate:
+    """Destructive actions need the caller's yes in a LATER turn than the one that asked.
+
+    A prompt rule ("confirm first") was ignored in testing: "cancel my appointment" cancelled one instantly,
+    without saying which. Here the first call only records the request and tells the model to ask; the same
+    call with confirmed=true works only from the next caller turn on. The model can't skip the question.
+    """
+
+    def __init__(self):
+        self._pending: dict[tuple, int] = {}  # (action, args...) -> turn the confirmation was requested
+
+    def check(self, key: tuple, confirmed: bool, turn: int, describe: str, asked_last_turn: bool = False) -> str | None:
+        """asked_last_turn: Hina's previous reply asked the caller to confirm. Models often ask in their own words
+        without calling the tool first; without this, a caller's "ji haan" got a second identical question."""
+        asked_at = self._pending.get(key)
+        if confirmed and ((asked_at is not None and asked_at < turn) or asked_last_turn):
+            self._pending.pop(key, None)
+            return None  # proceed
+        self._pending[key] = turn if asked_at is None else asked_at
+        return (f"CONFIRMATION NEEDED (nothing changed yet): {describe}. Ask the caller to confirm this exact "
+                f"appointment in plain words (no ids), wait for their answer, then call again with confirmed=true.")
+
+
+_GATES: dict[str, ConfirmationGate] = {}
+
+
 def leave_message(s: Session, phone: str, call_id: str | None, message: str, kind: str = "message") -> str:
     s.add(InboxItem(call_id=call_id, phone=phone, kind=kind, text=message))
     s.commit()
@@ -160,6 +209,8 @@ class SlotsArgs(BaseModel):
     date: str = Field(description="Date as YYYY-MM-DD, e.g. 2026-11-03")
     doctor: str | None = Field(None, description="Doctor name, e.g. 'Ayesha'")
     part_of_day: Literal["morning", "afternoon", "evening"] | None = None
+    around_time: str | None = Field(None, description="If the caller asks for a specific time: HH:MM 24h, e.g. "
+                                                      "'19:00' for 7 PM. Returns the slots closest to it.")
 
 
 class BookArgs(BaseModel):
@@ -170,19 +221,25 @@ class BookArgs(BaseModel):
 
 class ApptArgs(BaseModel):
     appointment_id: int
+    confirmed: bool = Field(False, description="true only after the caller said yes to this exact appointment")
 
 
 class RescheduleArgs(BaseModel):
     appointment_id: int
     new_slot_id: int
+    confirmed: bool = Field(False, description="true only after the caller said yes to this exact change")
 
 
 class MessageArgs(BaseModel):
     message: str = Field(description="Caller name, what they need, and best callback time")
 
 
-def make_tools(engine, phone: str, call_id: str | None = None) -> dict[str, list[StructuredTool]]:
-    """LangChain tools with the caller's phone bound in. Returns tool sets per agent."""
+def make_tools(engine, phone: str, call_id: str | None = None, turn: int = 0,
+               asked_last_turn: bool = False) -> dict[str, list[StructuredTool]]:
+    """LangChain tools with the caller's phone bound in. `turn` = index of the current caller turn and
+    `asked_last_turn` = Hina's previous reply asked for confirmation; both feed the confirmation gate for
+    destructive actions. Returns tool sets per agent."""
+    gate = _GATES.setdefault(call_id or phone, ConfirmationGate())
 
     def tool(fn, schema, name, description, with_phone=True):
         def run(**kwargs):
@@ -190,17 +247,31 @@ def make_tools(engine, phone: str, call_id: str | None = None) -> dict[str, list
                 return fn(s, phone, **kwargs) if with_phone else fn(s, **kwargs)
         return StructuredTool.from_function(run, name=name, description=description, args_schema=schema)
 
+    def gated_cancel(s, phone, appointment_id, confirmed=False):
+        stop = gate.check(("cancel", appointment_id), confirmed, turn,
+                          f"cancel {describe_appointment(s, phone, appointment_id)}", asked_last_turn)
+        return stop or cancel_appointment(s, phone, appointment_id)
+
+    def gated_reschedule(s, phone, appointment_id, new_slot_id, confirmed=False):
+        slot, doc = _free_slot(s, new_slot_id)
+        stop = gate.check(("reschedule", appointment_id, new_slot_id), confirmed, turn,
+                          f"move {describe_appointment(s, phone, appointment_id)} to {doc.name} on "
+                          f"{slot.start:%a %d %b, %I:%M %p}", asked_last_turn)
+        return stop or reschedule_appointment(s, phone, appointment_id, new_slot_id)
+
     booking = [
         tool(list_doctors, NoArgs, "list_doctors", "List clinic doctors with qualifications and fees.",
              with_phone=False),
-        tool(lambda s, date, doctor=None, part_of_day=None: get_available_slots(s, date, doctor, part_of_day),
+        tool(lambda s, date, doctor=None, part_of_day=None, around_time=None:
+             get_available_slots(s, date, doctor, part_of_day, around_time),
              SlotsArgs, "get_available_slots", "Free appointment slots on a date.", with_phone=False),
         tool(my_appointments, NoArgs, "my_appointments", "Upcoming appointments for THIS caller only."),
         tool(book_appointment, BookArgs, "book_appointment",
              "Book a slot for a patient. Confirm name and slot with the caller first."),
-        tool(cancel_appointment, ApptArgs, "cancel_appointment", "Cancel one of this caller's appointments."),
-        tool(reschedule_appointment, RescheduleArgs, "reschedule_appointment",
-             "Move one of this caller's appointments to a new slot."),
+        tool(gated_cancel, ApptArgs, "cancel_appointment",
+             "Cancel one of this caller's appointments. Needs the caller's explicit confirmation."),
+        tool(gated_reschedule, RescheduleArgs, "reschedule_appointment",
+             "Move one of this caller's appointments to a new slot. Needs the caller's explicit confirmation."),
     ]
     handoff = [tool(lambda s, phone, message: leave_message(s, phone, call_id, message), MessageArgs,
                     "leave_message_for_staff", "Save a message for clinic staff to call back.")]

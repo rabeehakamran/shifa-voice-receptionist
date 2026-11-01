@@ -1,14 +1,18 @@
 """FastAPI app: browser voice calls over WebSocket + owner dashboard API.
 
-Run: uvicorn shifa.api.main:app --reload   then open http://localhost:8000/call and /dashboard
+Run: uvicorn shifa.api.main:app   then open http://localhost:8000/call and /dashboard
 
 WebSocket protocol (/ws/call):
   client -> server  text {"type":"start","phone":"0300..."} | {"type":"hangup"}
-                    binary: one WAV utterance (16 kHz mono, already cut by the browser VAD)
-  server -> client  text {"type":"transcript"|"reply"|"filler"|"ended"|"error", ...}
-                    binary: MP3 audio, one message per sentence
-Barge-in: the browser stops playback when the caller starts talking and sends the next utterance;
-any audio still being synthesized for the old reply is cancelled.
+                    binary: one WAV speech segment (16 kHz mono, cut by the browser VAD)
+  server -> client  text {"type":"transcript"|"waiting"|"ignored"|"reply"|"timings"|"ended", ...}
+                    text {"type":"audio_start"} / binary MP3 chunks / text {"type":"audio_end"}: one streamed clip
+
+Turn handling:
+  - Every speech segment gets its own STT task, queued in order and never cancelled, so a sentence split by a
+    pause isn't lost. A turn manager joins the segments.
+  - If the joined text ends mid-thought ("...aur"), wait briefly for the rest (semantic end-of-turn).
+  - Barge-in: a new segment cancels the previous turn's answering and speaking, never its listening.
 """
 
 import asyncio
@@ -31,6 +35,7 @@ from shifa.db import Appointment, Call, Doctor, InboxItem, Slot, Turn, get_engin
 from shifa.rag import retriever
 from shifa.session import CallSession
 from shifa.voice import stt, tts
+from shifa.voice.turns import WAIT_FOR_REST_S, looks_incomplete
 
 STATIC = Path(__file__).with_name("static")
 FILLER_AFTER_S = 0.8
@@ -63,53 +68,89 @@ def dashboard_page():
 
 
 async def _filler(lang: str) -> bytes:
-    key = "en" if lang == "en" else "ur"
+    key = tts.voice_lang(lang)
     if key not in _filler_cache:
         _filler_cache[key] = await tts.synthesize(tts.FILLERS[key], key)
     return _filler_cache[key]
 
 
-async def _speak(ws: WebSocket, text: str, lang: str) -> int | None:
-    """Synthesize all sentences in parallel (Edge-TTS has ~1 s connection setup each), send in order.
-    Returns ms to the first audio sent."""
-    voice_lang = "en" if lang == "en" else "ur"
+async def _send_clip(ws: WebSocket, chunks) -> int | None:
+    """Stream one audio clip. `chunks` is bytes or an async iterator of bytes. Returns ms to the first chunk."""
     t0 = time.perf_counter()
-    jobs = [asyncio.create_task(tts.synthesize(s, voice_lang)) for s in tts.sentences(text)]
     first = None
+    await ws.send_json({"type": "audio_start"})
     try:
-        for job in jobs:
-            await ws.send_bytes(await job)
+        if isinstance(chunks, bytes):
+            chunks = _single(chunks)
+        async for chunk in chunks:
+            await ws.send_bytes(chunk)
             first = first if first is not None else round((time.perf_counter() - t0) * 1000)
     finally:
-        for job in jobs:  # on barge-in, stop synthesizing the rest
-            job.cancel()
+        await ws.send_json({"type": "audio_end"})
     return first
 
 
-async def _handle_utterance(ws: WebSocket, call: CallSession, wav: bytes) -> None:
+async def _single(data: bytes):
+    yield data
+
+
+async def _speak(ws: WebSocket, text: str, lang: str) -> int | None:
+    return await _send_clip(ws, tts.stream(text, lang))
+
+
+def _timed_transcribe(wav: bytes) -> tuple[str, int]:
     t0 = time.perf_counter()
-    text, lang = await asyncio.to_thread(stt.transcribe, wav, getattr(call, "stt_lang", None))
-    if lang == "ur":
-        call.stt_lang = "ur"  # sticky for the rest of the call: one Whisper request per turn
-    stt_ms = round((time.perf_counter() - t0) * 1000)
-    if not text:
+    text, _ = stt.transcribe(wav)
+    return text, round((time.perf_counter() - t0) * 1000)
+
+
+class VoiceTurns:
+    """Per-call voice state: queued STT tasks (in arrival order) and text heard but not yet answered."""
+
+    def __init__(self):
+        self.stt: list[asyncio.Task] = []
+        self.pending = ""
+        self.speech_ended_at = 0.0
+        self.stt_ms = 0
+
+
+async def _turn(ws: WebSocket, call: CallSession, vt: VoiceTurns) -> None:
+    # 1) Collect every finished-or-running transcription, in order. shield(): if this turn is cancelled by a
+    #    barge-in, the STT keeps running and the next turn picks its text up.
+    while vt.stt:
+        text, vt.stt_ms = await asyncio.shield(vt.stt[0])
+        vt.stt.pop(0)
+        if text:
+            vt.pending = f"{vt.pending} {text}".strip()
+    text = vt.pending
+    if not text:  # noise, breathing or a filler sound: stay quiet instead of "please repeat"
+        await ws.send_json({"type": "ignored", "stt_ms": vt.stt_ms})
         return
     await ws.send_json({"type": "transcript", "text": text})
 
-    # Run the agent; if it's slow (tool calls), play a filler so the line isn't silent.
+    # 2) Semantic end-of-turn: half a sentence? Give the caller a moment to finish.
+    if looks_incomplete(text):
+        await ws.send_json({"type": "waiting"})
+        await asyncio.sleep(WAIT_FOR_REST_S)  # a new segment arriving now cancels us; pending is kept
+    vt.pending = ""
+
+    # 3) Answer. If the agent is slow (tool calls), play a filler so the line isn't silent.
     turn_task = asyncio.create_task(asyncio.to_thread(call.turn, text))
     done, _ = await asyncio.wait({turn_task}, timeout=FILLER_AFTER_S)
     if not done:
         await ws.send_json({"type": "filler"})
-        await ws.send_bytes(await _filler(detect_script(text)))
+        await _send_clip(ws, await _filler(detect_script(text)))
     result = await turn_task
 
     await ws.send_json({"type": "reply", "text": result.reply, "route": result.route, "risk": result.risk,
-                        "escalated": result.escalated, "timings": {"stt": stt_ms, **result.timings_ms}})
-    tts_first = await _speak(ws, result.reply, detect_script(result.reply))
-    timings = {"stt": stt_ms, "tts_first_audio": tts_first,
-               "voice_to_voice": round((time.perf_counter() - t0) * 1000) if tts_first is None else
-               stt_ms + result.timings_ms["total"] + tts_first}
+                        "escalated": result.escalated, "lang": result.lang,
+                        "timings": {"stt": vt.stt_ms, **result.timings_ms}})
+    # The voice follows the language the turn was ANSWERED in, not a guess from the reply text.
+    tts_first = await _speak(ws, result.reply, result.lang)
+    timings = {"stt": vt.stt_ms, "tts_first_audio": tts_first,
+               "voice_to_voice": round((time.perf_counter() - vt.speech_ended_at) * 1000)}
+    if tts_first is not None:  # end of speech -> first audio of the real reply (filler excluded)
+        timings["voice_to_voice"] = vt.stt_ms + result.timings_ms["total"] + tts_first
     call.add_timings(timings)
     await ws.send_json({"type": "timings", "timings": timings})
 
@@ -118,6 +159,7 @@ async def _handle_utterance(ws: WebSocket, call: CallSession, wav: bytes) -> Non
 async def ws_call(ws: WebSocket):
     await ws.accept()
     call: CallSession | None = None
+    vt = VoiceTurns()
     current: asyncio.Task | None = None
     try:
         while True:
@@ -129,18 +171,22 @@ async def ws_call(ws: WebSocket):
                 if data["type"] == "start":
                     call = CallSession(data.get("phone") or "03001234567", channel="voice")
                     await ws.send_json({"type": "reply", "text": GREETING, "route": "greeting"})
-                    await _speak(ws, GREETING, "ur")
+                    current = asyncio.create_task(_speak(ws, GREETING, "ur"))
                 elif data["type"] == "hangup":
                     break
             elif msg.get("bytes") and call:
+                vt.speech_ended_at = time.perf_counter()
+                vt.stt.append(asyncio.create_task(asyncio.to_thread(_timed_transcribe, msg["bytes"])))
                 if current and not current.done():
-                    current.cancel()  # barge-in: drop the rest of the previous reply
-                current = asyncio.create_task(_handle_utterance(ws, call, msg["bytes"]))
+                    current.cancel()  # barge-in: stop answering/speaking the previous turn
+                current = asyncio.create_task(_turn(ws, call, vt))
     except WebSocketDisconnect:
         pass
     finally:
         if current and not current.done():
             current.cancel()
+        for t in vt.stt:
+            t.cancel()
         if call:
             summary = await asyncio.to_thread(call.end)
             try:

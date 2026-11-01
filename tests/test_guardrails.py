@@ -32,5 +32,39 @@ def test_urdu_caller_needs_urdu_script():
     assert problems("جی، کل صبح دس بجے وقت ہے۔", "ur") == []
 
 
+def test_exact_glued_duplicate_removed():
+    glued = "براہِ کرم اپنا نام بتائیں۔براہِ کرم اپنا نام بتائیں۔"
+    assert clean(glued) == "براہِ کرم اپنا نام بتائیں۔"
+
+
+def test_paraphrased_repeats_cut_by_sentence_cap():
+    # Verbatim from a voice test: three paraphrases of one request, glued without spaces.
+    real = ("براہ کرم واضح کریں کہ آپ ڈاکٹر عائشہ ملک کے ساتھ اپائنٹمنٹ چاہتے ہیں۔"
+            "آپ کی اپائنٹمنٹ کے لیے ڈاکٹر عائشہ ملک میں سے کسی ایک کا انتخاب کریں۔"
+            "آپ کی سہولت کے مطابق ڈاکٹر کا نام اور وقت بتائیں تاکہ میں اپائنٹمنٹ بُک کر سکوں۔")
+    assert clean(real).count("۔") == 2
+
+
+def test_reply_capped_at_two_sentences():
+    assert clean("One. Two. Three. Four.") == "One. Two."
+
+
+def test_abbreviations_and_times_do_not_split_sentences():
+    text = "Dr. Ayesha Malik ki fee Rs. 2000 hai. Kal subah 9.20 baje aa jayein."
+    assert clean(text) == text
+
+
+def test_internal_ids_flagged():
+    assert problems("آپ کی اپائنٹمنٹ (آئی ڈی 2) منسوخ کر دی گئی ہے۔", "ur")
+    assert problems("Booked, appointment_id=4.", "en")
+
+
+def test_english_turn_rejects_roman_urdu_reply():
+    # Verbatim from a voice call with an English-speaking caller.
+    assert "must be written in English" in problems("Kal subah 9 baje, 9:20 baje, ya 9:40 baje mein se koi pasand "
+                                                    "karenge?", "en")
+    assert problems("Your appointment with Dr. Ayesha Malik is confirmed for Saturday 9:40 AM.", "en") == []
+
+
 def test_normal_reply_passes():
     assert problems("Dr. Ayesha Malik ki fee Rs. 2000 hai.", "roman_ur") == []
