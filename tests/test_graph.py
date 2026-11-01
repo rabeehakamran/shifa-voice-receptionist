@@ -97,3 +97,24 @@ def test_caller_name_is_remembered_across_turns(engine, monkeypatch):
     call.turn("My name is Diya Aslam")
     call.turn("what are your timings?")  # this turn doesn't mention the name
     assert "The caller's name is Diya Aslam" in seen[-1]
+
+
+def test_trace_structure_and_no_raw_phone_number(engine, monkeypatch):
+    """What LangSmith would receive: a named root run per caller turn, filterable tags, and no raw phone."""
+    from langchain_core.tracers.context import collect_runs
+
+    for name in ("chat", "structured", "with_tools"):
+        monkeypatch.setattr(llm, name, _explode)  # emergency path: no LLM, so this test is fully offline
+    phone = "03001112222"
+    call = CallSession(phone, channel="voice", engine=engine, trace_tags=["arena"], trace_metadata={"persona": "x"})
+    with collect_runs() as cb:
+        call.turn("Abbu ko seenay mein dard hai")
+    root = cb.traced_runs[0]
+    assert root.name == "caller_turn #1"
+    assert {"voice", "arena"} <= set(root.tags)
+    meta = root.extra["metadata"]
+    assert meta["call_id"] == call.call_id and meta["persona"] == "x" and meta["caller"].startswith("caller-")
+
+    # collect_runs keeps only the ROOT run (child spans go to LangSmith separately), so check what it can see.
+    everything = str(root.inputs) + str(root.outputs) + str(root.extra)
+    assert phone not in everything  # privacy: the number never leaves the laptop

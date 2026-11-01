@@ -56,11 +56,12 @@ def apply_setup(engine, setup: dict, phone: str) -> None:
             bt.book_appointment(s, ph, slot_id, appt["patient_name"])
 
 
-def run_persona(p: dict, max_turns: int, pace: float, use_judge: bool) -> dict:
+def run_persona(p: dict, max_turns: int, pace: float, use_judge: bool, label: str = "") -> dict:
     engine = fresh_engine()
     phone = "0300" + str(zlib.crc32(p["id"].encode()) % 10_000_000).zfill(7)  # stable across runs
     apply_setup(engine, p.get("setup", {}), phone)
-    call = CallSession(phone, channel="sim", engine=engine)
+    call = CallSession(phone, channel="sim", engine=engine, trace_tags=["arena", p["category"], p["id"]],
+                       trace_metadata={"persona": p["id"], "arena_label": label})
     caller = SimulatedCaller(p)
     replies, turns, reply = [], [], None
     for _ in range(max_turns):
@@ -178,7 +179,7 @@ def main():
     for pid in ids:
         console.print(f"[bold]▶ {pid}[/]")
         try:
-            r = run_persona(personas[pid], args.max_turns, args.pace, not args.no_judge)
+            r = run_persona(personas[pid], args.max_turns, args.pace, not args.no_judge, args.label)
         except Exception as e:
             # Infra failure (quota, network): this persona was NOT evaluated; it must not count as an agent failure.
             r = {"id": pid, "category": personas[pid]["category"], "passed": False, "status": "error", "checks": [],

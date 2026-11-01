@@ -9,6 +9,8 @@ import difflib
 import re
 from collections import Counter
 
+from langsmith import traceable
+
 from shifa.agents.safety import detect_script
 
 TRIGGERS: Counter = Counter()  # issue -> count; reported by the eval runner
@@ -57,6 +59,7 @@ def clean(text: str) -> str:
     return " ".join(kept[:MAX_SENTENCES])
 
 
+@traceable(name="output_guardrail", run_type="chain")
 def problems(text: str, lang: str) -> list[str]:
     issues = []
     if not text:

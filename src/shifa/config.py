@@ -2,10 +2,15 @@ from datetime import date, datetime, time
 from functools import lru_cache
 from pathlib import Path
 
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
+
+# pydantic-settings reads .env into Settings only; libraries like LangSmith read os.environ. Without this,
+# LANGSMITH_TRACING=true in .env silently traced nothing. override=False: real env vars (and tests) win.
+load_dotenv(ROOT / ".env", override=False)
 
 
 class Settings(BaseSettings):

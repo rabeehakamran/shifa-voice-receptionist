@@ -11,6 +11,8 @@ Two Whisper habits we handle:
 import re
 from functools import lru_cache
 
+from langsmith import traceable
+
 from shifa.config import get_settings
 
 STT_MODEL = "whisper-large-v3"
@@ -77,6 +79,10 @@ def is_filler(text: str) -> bool:
 ALLOWED_LANGUAGES = {"urdu", "ur", "english", "en", "hindi", "hi", "punjabi", "pa", "arabic", "ar", "persian", "fa"}
 
 
+# Traced without the audio itself (only its size): uploading every utterance to LangSmith would be slow and
+# would send callers' voices to a third party.
+@traceable(name="whisper_stt", run_type="tool",
+           process_inputs=lambda i: {"audio_kb": round(len(i.get("wav") or b"") / 1024), "language": i.get("language")})
 def transcribe(wav: bytes, language: str | None = None) -> tuple[str, str]:
     """Returns (text, language). Empty text means noise, a filler sound or background media: don't answer it."""
     kwargs = {"language": language} if language else {}

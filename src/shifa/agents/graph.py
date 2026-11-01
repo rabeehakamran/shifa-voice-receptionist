@@ -37,7 +37,6 @@ _pool = ThreadPoolExecutor(max_workers=4)
 
 class CallState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
-    phone: str
     call_id: str
     channel: str
     caller_context: str
@@ -74,6 +73,11 @@ def timed(name: str):
 
 def _engine(config: RunnableConfig):
     return config["configurable"]["engine"]
+
+
+def _phone(config: RunnableConfig) -> str:
+    # The phone lives in config, not in graph state: state is recorded in every trace (see session.Caller).
+    return config["configurable"]["caller"].phone
 
 
 def _last_user_text(state: CallState) -> str:
@@ -141,7 +145,7 @@ def router(state: CallState, config: RunnableConfig) -> dict:
 def escalate(state: CallState, config: RunnableConfig) -> dict:
     # Deterministic, no LLM: the most important message must be instant and can't be hallucinated.
     with Session(_engine(config)) as s:
-        leave_message(s, state["phone"], state.get("call_id"),
+        leave_message(s, _phone(config), state.get("call_id"),
                       f"EMERGENCY reported by caller: {_last_user_text(state)}", kind="emergency")
     msg = ESCALATION_MESSAGES.get(state.get("lang", "en"), ESCALATION_MESSAGES["en"])
     return {"messages": [AIMessage(msg)], "route": "escalate", "escalated": True}
@@ -179,7 +183,7 @@ def faq(state: CallState, config: RunnableConfig) -> dict:
     # Only genuine KB gaps go to the owner's "teach Hina" inbox, not medical-advice or post-emergency turns.
     if "NO_ANSWER" in cites and state.get("risk") == "none" and not state.get("escalated"):
         with Session(_engine(config)) as s:
-            s.add(InboxItem(call_id=state.get("call_id"), phone=state["phone"], kind="unanswered",
+            s.add(InboxItem(call_id=state.get("call_id"), phone=_phone(config), kind="unanswered",
                             text=_last_user_text(state)))
             s.commit()
     valid = {h["id"] for h in hits}
@@ -238,7 +242,7 @@ def _tools(state: CallState, config: RunnableConfig):
     # Did Hina's previous spoken reply (before this caller turn) ask the caller to confirm something?
     spoken = [m for m in state["messages"][:-1] if isinstance(m, AIMessage) and m.text and not m.tool_calls]
     asked = bool(spoken) and bool(_ASKS_CONFIRM.search(spoken[-1].text))
-    return make_tools(_engine(config), state["phone"], state.get("call_id"), turn=turn, asked_last_turn=asked)
+    return make_tools(_engine(config), _phone(config), state.get("call_id"), turn=turn, asked_last_turn=asked)
 
 
 @timed("booking")

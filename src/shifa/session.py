@@ -1,5 +1,6 @@
 """One phone call. Shared entry point for the CLI, the voice server and the eval simulator."""
 
+import hashlib
 import threading
 import time
 import uuid
@@ -73,13 +74,40 @@ def factual_outcome(messages: list, escalated: bool) -> str | None:
     return None
 
 
+class Caller:
+    """Carries the phone number through the graph config instead of the graph state.
+
+    Graph state is recorded as each turn's input/output in LangSmith traces, and LangChain also copies plain
+    str/int config values into trace metadata. A small object is neither, and prints as a pseudonym, so the
+    number never leaves the laptop. (A privacy test caught the leak when the phone was still in state.)
+    """
+
+    __slots__ = ("phone",)
+
+    def __init__(self, phone: str):
+        self.phone = phone
+
+    def __repr__(self) -> str:
+        return caller_ref(self.phone)
+
+
+def caller_ref(phone: str) -> str:
+    """Stable pseudonym for traces: lets you group one caller's calls in LangSmith without sending the number."""
+    return "caller-" + hashlib.sha256(phone.encode()).hexdigest()[:10]
+
+
 class CallSession:
-    def __init__(self, phone: str, channel: str = "text", engine=None, call_id: str | None = None):
+    def __init__(self, phone: str, channel: str = "text", engine=None, call_id: str | None = None,
+                 trace_tags: list[str] | None = None, trace_metadata: dict | None = None):
         self.engine = engine or get_engine()
         self.phone = phone
         self.channel = channel
         self.call_id = call_id or uuid.uuid4().hex[:12]
-        self.config = {"configurable": {"thread_id": self.call_id, "engine": self.engine}}
+        self.config = {"configurable": {"thread_id": self.call_id, "engine": self.engine, "caller": Caller(phone)}}
+        # LangSmith labels (ignored when tracing is off): filter by channel or Arena persona, group by call/caller.
+        self.trace_tags = [channel, *(trace_tags or [])]
+        self.trace_metadata = {"call_id": self.call_id, "caller": caller_ref(phone), "channel": channel,
+                               **(trace_metadata or {})}
         self.transcript: list[tuple[str, str]] = []
         self._first = True
         self._lock = threading.Lock()
@@ -97,10 +125,13 @@ class CallSession:
         t0 = time.perf_counter()
         update = {"messages": [HumanMessage(text)], "timings": {}}
         if self._first:
-            update |= {"phone": self.phone, "call_id": self.call_id, "channel": self.channel,
+            update |= {"call_id": self.call_id, "channel": self.channel,
                        "caller_context": caller_context(self.engine, self.phone), "escalated": False}
             self._first = False
-        state = _graph().invoke(update, self.config)
+        turn_no = len(self.transcript) // 2 + 1
+        state = _graph().invoke(update, {**self.config, "run_name": f"caller_turn #{turn_no}",
+                                         "tags": self.trace_tags,
+                                         "metadata": {**self.trace_metadata, "turn": turn_no, "caller_text": text}})
         timings = {**state.get("timings", {}), "total": round((time.perf_counter() - t0) * 1000)}
         result = TurnResult(reply=state["messages"][-1].text, route=state.get("route", ""),
                             risk=state.get("risk", "none"), escalated=state.get("escalated", False),
@@ -136,7 +167,8 @@ class CallSession:
                 convo = "\n".join(f"{who}: {text}" for who, text in self.transcript)
                 try:
                     out: CallSummary = llm.structured(CallSummary, tier="fast").invoke(
-                        [("system", prompts.POST_CALL), ("human", convo)])
+                        [("system", prompts.POST_CALL), ("human", convo)],
+                        {"run_name": "post_call_summary", "tags": self.trace_tags, "metadata": self.trace_metadata})
                     call.summary, call.sentiment, call.outcome, call.tags = (
                         out.summary, out.sentiment, out.outcome, out.tags)
                 except Exception as e:  # a failed summary must never lose the call record

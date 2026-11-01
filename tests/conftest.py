@@ -6,6 +6,8 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, create_engine
 
 os.environ["SHIFA_TODAY"] = "2026-11-02"  # a Monday; must be set before settings are first read
+os.environ["LANGSMITH_TRACING"] = "false"  # unit tests never send traces, even if .env enables tracing
+os.environ["SHIFA_MESSAGING_PROVIDER"] = "simulate"  # ...and never message anyone
 
 from shifa.config import get_settings  # noqa: E402
 from shifa.seed import seed  # noqa: E402
