@@ -58,18 +58,65 @@ def _models(tier: Tier, temperature: float) -> tuple[BaseChatModel, ...]:
     return tuple(models)
 
 
-def _chain(runnables: list[Runnable]) -> Runnable:
+class CircuitBreaker:
+    """Skip a rate-limited provider until it says it's available again.
+
+    Without this, once Groq's DAILY quota ran out, every single LLM call still asked Groq first, waited for the
+    429, tried the next model, and only then reached Gemini: voice turns of 8-19 s. Now the first 429 opens the
+    breaker for the time the provider asks for ("try again in 7m12s"), and calls go straight to a working one.
+    """
+
+    DEFAULT_COOLDOWN_S = 60.0
+    # Groq: "Please try again in 7m12.5s". Gemini: "Please retry in 43.03s".
+    _RETRY = re.compile(r"(?:try again|retry) in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?", re.I)
+
+    def __init__(self):
+        self.open_until: dict[str, float] = {}
+
+    def is_open(self, key: str, now: float | None = None) -> bool:
+        return self.open_until.get(key, 0.0) > (now if now is not None else time.monotonic())
+
+    def trip(self, key: str, error: Exception, now: float | None = None) -> float:
+        m = self._RETRY.search(str(error))
+        h, mins, secs = (m.groups() if m and any(m.groups()) else (None, None, None))
+        cooldown = (int(h or 0) * 3600 + int(mins or 0) * 60 + float(secs or 0)) or self.DEFAULT_COOLDOWN_S
+        self.open_until[key] = (now if now is not None else time.monotonic()) + cooldown
+        return cooldown
+
+
+BREAKER = CircuitBreaker()
+
+
+def _is_rate_limit(e: Exception) -> bool:
+    text = f"{type(e).__name__} {e}"
+    return "RateLimit" in text or "429" in text or "RESOURCE_EXHAUSTED" in text
+
+
+def _key(model: BaseChatModel) -> str:
+    return f"{type(model).__name__}:{getattr(model, 'model_name', None) or getattr(model, 'model', '')}"
+
+
+def _chain(runnables: list[Runnable], keys: list[str] | None = None) -> Runnable:
     if len(runnables) == 1:
         return runnables[0]
+    keys = keys or [str(i) for i in range(len(runnables))]
 
     def invoke(inp, config=None):
         err = None
-        for i, r in enumerate(runnables):
+        order = [i for i in range(len(runnables)) if not BREAKER.is_open(keys[i])]
+        if not order:  # everything is cooling down: try the one that reopens soonest rather than failing
+            order = [min(range(len(runnables)), key=lambda i: BREAKER.open_until.get(keys[i], 0.0))]
+        for i in order:
             try:
-                return r.invoke(inp, config)
+                return runnables[i].invoke(inp, config)
             except Exception as e:  # noqa: BLE001 - any provider failure should fall through
                 FALLBACKS[f"{i}:{type(e).__name__}"] += 1
-                log.warning("LLM provider %d failed (%s: %s); trying next", i, type(e).__name__, str(e)[:200])
+                if _is_rate_limit(e):
+                    cooldown = BREAKER.trip(keys[i], e)
+                    log.warning("LLM provider %s rate-limited; skipping it for %.0fs", keys[i], cooldown)
+                else:
+                    log.warning("LLM provider %s failed (%s: %s); trying next", keys[i], type(e).__name__,
+                                str(e)[:200])
                 err = e
         raise err
 
@@ -78,17 +125,20 @@ def _chain(runnables: list[Runnable]) -> Runnable:
 
 def chat(tier: Tier = "smart", temperature: float = 0.2) -> Runnable:
     # Same temperature as with_tools on purpose: one cached client (one warm connection) per tier.
-    return _chain(list(_models(tier, temperature)))
+    models = _models(tier, temperature)
+    return _chain(list(models), [_key(m) for m in models])
 
 
 @lru_cache
 def structured(schema, tier: Tier = "fast", temperature: float = 0.0) -> Runnable:
-    return _chain([m.with_structured_output(schema) for m in _models(tier, temperature)])
+    models = _models(tier, temperature)
+    return _chain([m.with_structured_output(schema) for m in models], [_key(m) for m in models])
 
 
 def with_tools(tools, tier: Tier = "smart", temperature: float = 0.2) -> Runnable:
     # Not cached: tools are bound to the caller's phone. bind_tools is cheap; it reuses the cached clients.
-    return _chain([m.bind_tools(tools) for m in _models(tier, temperature)])
+    models = _models(tier, temperature)
+    return _chain([m.bind_tools(tools) for m in models], [_key(m) for m in models])
 
 
 def warmup() -> None:

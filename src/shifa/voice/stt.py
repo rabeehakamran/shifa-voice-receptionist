@@ -14,9 +14,12 @@ from functools import lru_cache
 from shifa.config import get_settings
 
 STT_MODEL = "whisper-large-v3"
-# A short prompt biases Whisper toward clinic vocabulary and the doctors' correct spellings in both scripts.
-PROMPT = ("Shifa Family Clinic, Dr. Ayesha Malik, Dr. Usman Tariq, Dr. Sana Iqbal, appointment, fees. "
-          "شفا فیملی کلینک، ڈاکٹر عائشہ ملک، ڈاکٹر عثمان طارق، ڈاکٹر ثنا اقبال، اپائنٹمنٹ")
+# A short prompt biases Whisper toward the doctors' correct spellings. Kept minimal on purpose: on noise, Whisper
+# echoes its prompt back as if the caller said it ("شفا فیملی کلینک، ڈاکٹر عائشہ ملک، ... اپائنٹمنٹ" six times in
+# one call), so every extra word is more echo material. See is_prompt_echo().
+PROMPT = "Dr. Ayesha Malik, Dr. Usman Tariq, Dr. Sana Iqbal. ڈاکٹر عائشہ ملک، ڈاکٹر عثمان طارق، ڈاکٹر ثنا اقبال"
+_OLD_PROMPTS = "Shifa Family Clinic appointment fees شفا فیملی کلینک اپائنٹمنٹ کل ڈاکٹر صاحب"
+_PROMPT_WORDS = set(re.findall(r"\w+", (PROMPT + " " + _OLD_PROMPTS).lower()))
 _DEVANAGARI = re.compile(r"[ऀ-ॿ]")
 NO_SPEECH_PROB = 0.6
 MIN_AVG_LOGPROB = -1.0
@@ -58,6 +61,13 @@ def _speech_text(res) -> str:
     return text
 
 
+def is_prompt_echo(text: str) -> bool:
+    """Whisper repeating its own hint text. 4+ words that are (nearly) all hint words is an echo; a short real
+    answer like "ڈاکٹر عائشہ ملک" (3 words) to "which doctor?" must still get through."""
+    words = re.findall(r"\w+", text.lower())
+    return len(words) >= 4 and sum(w in _PROMPT_WORDS for w in words) / len(words) >= 0.8
+
+
 def is_filler(text: str) -> bool:
     return re.sub(r"[^\w\s]", "", text).strip().lower() in FILLERS
 
@@ -77,6 +87,6 @@ def transcribe(wav: bytes, language: str | None = None) -> tuple[str, str]:
         return "", lang
     if not language and (_DEVANAGARI.search(text) or lang in {"hindi", "hi"}):
         return transcribe(wav, language="ur")
-    if is_filler(text):
+    if is_filler(text) or is_prompt_echo(text):
         text = ""
     return text, "ur" if lang in {"urdu", "ur"} else lang

@@ -88,3 +88,15 @@ def test_background_media_in_other_languages_is_dropped(monkeypatch):
 
     monkeypatch.setattr(stt, "_client", lambda: Client)
     assert stt.transcribe(b"wav") == ("", "spanish")
+
+
+def test_whisper_echoing_its_own_hint_is_dropped():
+    # Verbatim, transcribed six times in one noisy call.
+    assert stt.is_prompt_echo("شفا فیملی کلینک، ڈاکٹر عائشہ ملک، ڈاکٹر ثنا اقبال، اپائنٹمنٹ")
+    assert stt.is_prompt_echo("شفا فیملی کلینک، ڈاکٹر عائشہ ملک، اپائنٹمنٹ")
+
+
+def test_real_short_answers_with_doctor_names_survive():
+    assert not stt.is_prompt_echo("ڈاکٹر عائشہ ملک")  # answer to "which doctor?"
+    assert not stt.is_prompt_echo("مجھے ڈاکٹر عائشہ ملک کے ساتھ کل صبح اپائنٹمنٹ چاہیے")
+    assert not stt.is_prompt_echo("Dr. Usman Tariq please")

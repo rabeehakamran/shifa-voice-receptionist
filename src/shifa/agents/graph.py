@@ -41,6 +41,7 @@ class CallState(TypedDict, total=False):
     call_id: str
     channel: str
     caller_context: str
+    caller_name: str
     lang: str
     route: str
     risk: str
@@ -55,6 +56,7 @@ class RouterDecision(BaseModel):
     route: Literal["booking", "faq", "handoff"]
     risk: Literal["none", "urgent", "medical_advice", "injection", "emergency"] = "none"
     search_query: str = Field("", description="English KB search query; empty for booking")
+    caller_name: str = Field("", description="The caller's own name if they stated it in the conversation")
 
 
 def timed(name: str):
@@ -88,6 +90,10 @@ def _dialogue(state: CallState, n: int = 8) -> list[AnyMessage]:
 def _system(state: CallState, *parts: str) -> str:
     """Persona + language + agent instructions, plus post-escalation care if this call had an emergency."""
     extra = [prompts.POST_ESCALATION] if state.get("escalated") else []
+    if state.get("caller_name"):
+        # A caller asked "do you have the memory of a goldfish?" after giving her name and being asked again.
+        extra.append(f"The caller's name is {state['caller_name']}. Never ask for it again; use it when needed "
+                     f"(the patient may be someone else: ask for the PATIENT's name only if it may differ).")
     return "\n\n".join([prompts.PERSONA, prompts.messaging_rule(), prompts.LANG[state.get("lang", "en")], *parts,
                         *extra, state.get("caller_context", "")])
 
@@ -124,8 +130,11 @@ def router(state: CallState, config: RunnableConfig) -> dict:
     timings = {"router_llm": llm_ms, "retrieval": retrieval_ms}
     if decision.route == "faq" and decision.search_query and (not hits or hits[0]["score"] < REWRITE_RETRY_SCORE):
         hits, timings["retrieval_retry"] = _timed_search(decision.search_query)
-    return {"route": decision.route, "risk": decision.risk, "search_query": decision.search_query,
-            "hits": hits, "timings": timings}
+    out = {"route": decision.route, "risk": decision.risk, "search_query": decision.search_query,
+           "hits": hits, "timings": timings}
+    if decision.caller_name.strip():  # only ever set, never cleared by a turn that doesn't mention it
+        out["caller_name"] = decision.caller_name.strip()
+    return out
 
 
 @timed("escalate")

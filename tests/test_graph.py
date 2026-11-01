@@ -84,3 +84,16 @@ def test_outcome_uses_last_action():
     msgs = [ToolMessage("BOOKED appointment_id=3", tool_call_id="1", name="book_appointment"),
             ToolMessage("CANCELLED appointment_id=3", tool_call_id="2", name="cancel_appointment")]
     assert factual_outcome(msgs, escalated=False) == "cancelled"
+
+
+def test_caller_name_is_remembered_across_turns(engine, monkeypatch):
+    """Regression: 'Bro, do you have memory of a goldfish? I told you my name just a minute before.'"""
+    decisions = iter([g.RouterDecision(route="faq", caller_name="Diya Aslam"), g.RouterDecision(route="faq")])
+    monkeypatch.setattr(llm, "structured", lambda *a, **k: RunnableLambda(lambda _: next(decisions)))
+    seen = []
+    monkeypatch.setattr(llm, "chat", lambda *a, **k: RunnableLambda(
+        lambda msgs: seen.append(msgs[0].content) or AIMessage("Ji, bataiye.")))
+    call = CallSession("03001112222", engine=engine)
+    call.turn("My name is Diya Aslam")
+    call.turn("what are your timings?")  # this turn doesn't mention the name
+    assert "The caller's name is Diya Aslam" in seen[-1]

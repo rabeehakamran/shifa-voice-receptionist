@@ -271,3 +271,25 @@
     booking: {patient_name: [Sumayya, سمیہ], doctor: Usman, day: "2026-11-03"}
     # Hina has no messaging tool; promising one is a hallucinated capability (seen in a voice test).
     must_not_contain_any: ["پیغام بھیج دوں گی", "میسج بھیج دوں گی", "میسج کر دوں گی", "I'll send you", "I will send you", "sms bhej"]
+
+# ---- Regression personas from the fourth voice test ----
+
+- id: punjabi_speaking_mother
+  category: regression
+  persona: Elderly woman who speaks only Punjabi (written in Urdu script), polite, slow.
+  goal: Get an appointment tomorrow morning with the lady doctor. Her name is Naseem Bibi.
+  opening: "السلام علیکم پتر، مینوں کل سویرے لیڈی ڈاکٹر کول ٹائم چاہی دا اے"
+  expect:
+    booking: {patient_name: [Naseem, نسیم], doctor: Ayesha, day: "2026-11-03"}
+    # Policy: understand Punjabi, reply in simple Urdu; never promise Punjabi (Hina contradicted herself on this).
+    must_not_contain_any: ["پنجابی میں بات کر", "speak Punjabi", "punjabi mein baat"]
+    language: ur
+
+- id: remembers_caller_name
+  category: regression
+  persona: Impatient English-speaking caller who gives her name in the first sentence and hates repeating herself.
+  goal: Leave a message for a doctor (she is an old classmate) asking them to call back. Never repeat your name.
+  opening: "Hi, I'm Diya Aslam. I need to leave a message for one of your doctors, please."
+  expect:
+    must_not_contain_any: ["your name", "may i have your name", "tell me your name", "what is your name"]
+    inbox_kind: message
