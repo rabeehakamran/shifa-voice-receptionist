@@ -88,8 +88,8 @@ def _dialogue(state: CallState, n: int = 8) -> list[AnyMessage]:
 def _system(state: CallState, *parts: str) -> str:
     """Persona + language + agent instructions, plus post-escalation care if this call had an emergency."""
     extra = [prompts.POST_ESCALATION] if state.get("escalated") else []
-    return "\n\n".join([prompts.PERSONA, prompts.LANG[state.get("lang", "en")], *parts, *extra,
-                        state.get("caller_context", "")])
+    return "\n\n".join([prompts.PERSONA, prompts.messaging_rule(), prompts.LANG[state.get("lang", "en")], *parts,
+                        *extra, state.get("caller_context", "")])
 
 
 @timed("safety")

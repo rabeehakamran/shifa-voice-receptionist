@@ -11,8 +11,9 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from shifa.config import clinic_now
+from shifa.config import clinic_now, get_settings
 from shifa.db import Appointment, Doctor, InboxItem, Slot
+from shifa.messaging import outbox
 
 PARTS_OF_DAY = {"morning": (time(0), time(13)), "afternoon": (time(12), time(17)), "evening": (time(17), time(23, 59))}
 
@@ -132,8 +133,11 @@ def book_appointment(s: Session, phone: str, slot_id: int, patient_name: str, re
     slot.is_booked = True
     appt = Appointment(slot_id=slot.id, patient_name=patient_name.strip(), phone=phone, reason=reason)
     s.add(appt)
-    s.commit()
-    return f"BOOKED appointment_id={appt.id} for {appt.patient_name}: {fmt_slot(slot, doc)}, fee Rs. {doc.fee}"
+    s.flush()  # assigns appt.id for the outbox rows
+    outbox.on_booked(s, appt, slot, doc)
+    s.commit()  # booking + its confirmation/reminder messages: saved together or not at all
+    return (f"BOOKED appointment_id={appt.id} for {appt.patient_name}: {fmt_slot(slot, doc)}, fee Rs. {doc.fee}."
+            f"{_messaging_note()}")
 
 
 def _own_appointment(s: Session, phone: str, appointment_id: int) -> Appointment:
@@ -147,9 +151,11 @@ def _own_appointment(s: Session, phone: str, appointment_id: int) -> Appointment
 def cancel_appointment(s: Session, phone: str, appointment_id: int) -> str:
     appt = _own_appointment(s, phone, appointment_id)
     appt.status = "cancelled"
-    s.get(Slot, appt.slot_id).is_booked = False
+    slot = s.get(Slot, appt.slot_id)
+    slot.is_booked = False
+    outbox.on_cancelled(s, appt, slot, s.get(Doctor, slot.doctor_id))
     s.commit()
-    return f"CANCELLED appointment_id={appointment_id}"
+    return f"CANCELLED appointment_id={appointment_id}.{_messaging_note()}"
 
 
 def reschedule_appointment(s: Session, phone: str, appointment_id: int, new_slot_id: int) -> str:
@@ -158,8 +164,17 @@ def reschedule_appointment(s: Session, phone: str, appointment_id: int, new_slot
     s.get(Slot, appt.slot_id).is_booked = False
     new_slot.is_booked = True
     appt.slot_id = new_slot.id
+    outbox.on_rescheduled(s, appt, new_slot, doc)
     s.commit()
-    return f"RESCHEDULED appointment_id={appointment_id} to {fmt_slot(new_slot, doc)}"
+    return f"RESCHEDULED appointment_id={appointment_id} to {fmt_slot(new_slot, doc)}.{_messaging_note()}"
+
+
+def _messaging_note() -> str:
+    """Tells the agent what it may promise. Only a REAL provider counts: in "simulate" mode nothing reaches the
+    caller's phone, so Hina must not say a message is coming."""
+    if get_settings().messaging_provider == "whatsapp":
+        return " The clinic will automatically send a WhatsApp confirmation and a reminder to this number."
+    return ""
 
 
 def describe_appointment(s: Session, phone: str, appointment_id: int) -> str:

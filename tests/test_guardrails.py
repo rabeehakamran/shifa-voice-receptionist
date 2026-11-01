@@ -68,3 +68,9 @@ def test_english_turn_rejects_roman_urdu_reply():
 
 def test_normal_reply_passes():
     assert problems("Dr. Ayesha Malik ki fee Rs. 2000 hai.", "roman_ur") == []
+
+
+def test_slot_numbers_flagged():
+    # Verbatim from a Gemini fallback reply.
+    assert problems("Sumayya, aap ka appointment kal shaam 6 baje (slot 148) confirm kar doon?", "roman_ur")
+    assert problems("Kal shaam 6 baje ka slot available hai.", "roman_ur") == []  # the word "slot" alone is fine

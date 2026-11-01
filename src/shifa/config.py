@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     # Pinning "today" makes evals reproducible; empty means the real date.
     today: date | None = None
 
+    # Patient messaging. "simulate": the outbox fills and the dispatcher marks messages "simulated" (visible on the
+    # dashboard, nothing leaves the laptop). "whatsapp": sent for real via the WhatsApp Cloud API.
+    # Hina only tells callers about messages when a real provider is configured.
+    messaging_provider: str = "simulate"
+    whatsapp_token: str = ""
+    whatsapp_phone_number_id: str = ""
+
 
 class Keys(BaseSettings):
     """API keys use their standard un-prefixed env names."""

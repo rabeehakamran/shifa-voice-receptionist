@@ -69,6 +69,24 @@ class InboxItem(SQLModel, table=True):
     created_at: NaiveDatetime = Field(default_factory=datetime.now)
 
 
+class OutboxMessage(SQLModel, table=True):
+    """Transactional outbox: messages are written in the SAME transaction as the booking change that causes them,
+    then a dispatcher sends them. Booking saved <=> message queued; a crash or a WhatsApp outage can't lose one."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    appointment_id: int | None = Field(default=None, index=True)
+    phone: str = Field(index=True)
+    kind: str  # confirmation | reminder | rescheduled | cancelled
+    body: str
+    send_after: NaiveDatetime = Field(index=True)
+    status: str = Field(default="pending", index=True)  # pending | sent | simulated | failed | cancelled
+    attempts: int = 0
+    last_error: str = ""
+    external_id: str = ""  # provider message id, for delivery tracking
+    sent_at: NaiveDatetime | None = None
+    created_at: NaiveDatetime = Field(default_factory=datetime.now)
+
+
 @lru_cache
 def get_engine(url: str | None = None):
     if url is None:

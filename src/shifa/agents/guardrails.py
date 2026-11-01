@@ -32,7 +32,8 @@ MAX_SENTENCES = 2  # paraphrased repeats score only 0.33-0.49 similarity (measur
 # Urdu full stop / question mark always end a sentence (replies arrive glued with no space). A Latin ". ! ?"
 # ends one only before whitespace and not after an abbreviation: "Dr. Ayesha ki fee Rs. 2000 hai." is ONE sentence.
 _SENTENCE = re.compile(r"(?<=[۔؟])\s*|(?<=[.!?])(?<!\bDr\.)(?<!\bRs\.)(?<!\bMr\.)(?<!\bMs\.)(?<!\bSt\.)\s+", re.I)
-_IDS = re.compile(r"\b(?:slot_id|appointment_id|slot id|appointment id|id\s*[:=#]?\s*\d+)\b|آئی ?ڈی", re.I)
+_IDS = re.compile(r"\b(?:slot_id|appointment_id|slot id|appointment id|id\s*[:=#]?\s*\d+|slot\s*[:=#]?\s*\d+)\b"
+                  r"|آئی ?ڈی|سلاٹ ?\d+", re.I)  # "(slot 148)" leaked from a Gemini fallback reply
 
 
 def _norm(s: str) -> str:

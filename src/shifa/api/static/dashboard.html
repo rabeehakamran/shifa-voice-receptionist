@@ -36,6 +36,13 @@
       <table id="appts"></table>
     </div>
   </section>
+
+  <section class="grid">
+    <div class="panel" style="grid-column: 1 / -1">
+      <h2>Outbox <span id="outboxMode" class="hint"></span></h2>
+      <div id="outbox" class="list"></div>
+    </div>
+  </section>
 </main>
 
 <script>
@@ -106,9 +113,24 @@ async function loadAppts() {
     a.map((x) => `<tr><td>${time(x.start)}</td><td>${esc(x.patient)}<div class="small">${esc(x.phone)}</div></td><td>${esc(x.doctor)}</td><td>${esc(x.reason)}</td></tr>`).join("");
 }
 
-function refresh() { loadStats(); loadCalls(); loadInbox(); loadAppts(); if (selected) openCall(selected); }
+async function loadOutbox() {
+  const { provider, messages } = await get("/api/outbox");
+  $("outboxMode").textContent = provider === "whatsapp"
+    ? "sending for real via WhatsApp"
+    : "simulation mode: messages are queued and 'sent' here only, nothing reaches patients' phones";
+  const tag = { pending: "unanswered", failed: "emergency", cancelled: "", expired: "" };
+  $("outbox").innerHTML = messages.map((m) => `
+    <div class="item">
+      <div class="row"><span><span class="tag ${tag[m.status] ?? ""}">${esc(m.status)}</span> <b>${esc(m.kind)}</b> → ${esc(m.phone)}</span>
+        <span class="small">${m.status === "pending" ? "send at " + time(m.send_after) : m.sent_at ? "sent " + time(m.sent_at) : ""}${m.attempts > 1 ? ` · ${m.attempts} attempts` : ""}</span></div>
+      <div class="small" style="white-space: pre-wrap">${esc(m.body)}</div>
+      ${m.last_error ? `<div class="small" style="color: var(--red)">${esc(m.last_error)}</div>` : ""}
+    </div>`).join("") || `<div class="muted">No messages yet: book an appointment in a call.</div>`;
+}
+
+function refresh() { loadStats(); loadCalls(); loadInbox(); loadAppts(); loadOutbox(); if (selected) openCall(selected); }
 refresh();
-setInterval(() => { loadStats(); loadCalls(); loadAppts(); }, 4000);
+setInterval(() => { loadStats(); loadCalls(); loadAppts(); loadOutbox(); }, 4000);
 </script>
 </body>
 </html>

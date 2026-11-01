@@ -31,7 +31,8 @@ from sqlmodel import Session, select
 from shifa import llm
 from shifa.agents.safety import detect_script
 from shifa.config import get_settings
-from shifa.db import Appointment, Call, Doctor, InboxItem, Slot, Turn, get_engine
+from shifa.db import Appointment, Call, Doctor, InboxItem, OutboxMessage, Slot, Turn, get_engine
+from shifa.messaging.dispatch import run_dispatcher
 from shifa.rag import retriever
 from shifa.session import CallSession
 from shifa.voice import stt, tts
@@ -49,6 +50,8 @@ _filler_cache: dict[str, bytes] = {}
 @app.on_event("startup")
 async def _warmup():
     llm.warmup()
+    # Background task: sends due outbox messages (confirmations now, reminders at 6 PM the evening before).
+    app.state.dispatcher = asyncio.create_task(run_dispatcher(get_engine()))
     for lang in ("ur", "en"):  # fillers must play instantly, so synthesize them before any call
         try:
             await _filler(lang)
@@ -277,3 +280,10 @@ def stats():
         "latency_ms": {"agent_p50": statistics.median(agent) if agent else None,
                        "voice_to_voice_p50": statistics.median(v2v) if v2v else None},
     }
+
+
+@app.get("/api/outbox")
+def list_outbox(limit: int = 100):
+    with _session() as s:
+        rows = s.exec(select(OutboxMessage).order_by(OutboxMessage.created_at.desc()).limit(limit)).all()
+        return {"provider": get_settings().messaging_provider, "messages": [m.model_dump() for m in rows]}
