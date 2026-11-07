@@ -40,82 +40,52 @@ Shifa Desk is designed around those realities, for a fictional but realistic gen
 
 ## Architecture
 
-```
-                         ┌───────────────────────── CALLER ─────────────────────────┐
-                         │  Browser /call page (voice)          Text CLI / chat      │
-                         │  mic → Silero VAD + noise gate       (typed turns)        │
-                         └──────┬──────────────────────────────────────┬─────────────┘
-                     WAV over   │                                      │
-                     WebSocket  ▼                                      │
-                ┌──────────────────────────────┐                       │
-                │ STT: Groq Whisper-large-v3   │                       │
-                │ · Hindi-script → retry "ur"  │                       │
-                │ · prompt-echo filter         │                       │
-                └──────────────┬───────────────┘                       │
-                               └───────────────┬───────────────────────┘
-                                               ▼
-╔══════════════════════ LangGraph: one graph invocation = one caller turn ══════════════════════╗
-║                                                                                              ║
-║   ┌────────────────────────────┐  emergency   ┌──────────────────────────────────────┐       ║
-║   │ 1. SAFETY RULES (no LLM)   │─────────────►│ ESCALATE (no LLM)                    │       ║
-║   │ regex lexicon EN/Roman/UR  │              │ fixed "call Rescue 1122" message     │       ║
-║   │ + language detection       │              │ + emergency alert in staff inbox     │       ║
-║   └─────────────┬──────────────┘              └──────────────────▲───────────────────┘       ║
-║                 ▼                                                │ risk = emergency          ║
-║   ┌────────────────────────────┐   parallel   ┌──────────────────┴───────────┐               ║
-║   │ 2. ROUTER (gpt-oss-20b)    │─ ─ ─ ─ ─ ─ ─►│ Speculative RAG retrieval    │               ║
-║   │ route + risk + EN rewrite  │              │ Gemini embeddings → Chroma   │               ║
-║   │ + caller-name memory       │              │ (retry with rewrite if weak) │               ║
-║   └──┬──────────┬──────────┬───┘              └──────────────┬───────────────┘               ║
-║      │ faq      │ booking  │ handoff                         │ hits                          ║
-║      ▼          ▼          ▼                                 │                               ║
-║  ┌────────┐ ┌──────────────────────┐ ┌──────────────┐        │                               ║
-║  │  FAQ   │◄┼──────────────────────┼─┼──────────────┼────────┘                               ║
-║  │ 120b   │ │ BOOKING tool loop    │ │ HANDOFF      │                                        ║
-║  │ cites  │ │ (gpt-oss-120b)       │ │ leave_message│                                        ║
-║  │ [ids]  │ │ phone-bound tools:   │ └──────┬───────┘                                        ║
-║  │ NO_ANS │ │  slots · book ·      │        │                                                ║
-║  │ →inbox │ │  cancel* · move*     │        │   * = confirmation gate:                       ║
-║  └───┬────┘ │ tool-side checks:    │        │     needs caller's "yes" in a later turn       ║
-║      │      │  time==slot, real    │        │                                                ║
-║      │      │  name, no 2nd booking│        │                                                ║
-║      │      └──────────┬───────────┘        │                                                ║
-║      ▼                 ▼                    ▼                                                ║
-║   ┌────────────────────────────────────────────────────────┐                                 ║
-║   │ 3. OUTPUT GUARDRAILS (code, every spoken reply)        │                                 ║
-║   │ · strip leaks/artifacts · 2-sentence cap (keeps "?")   │                                 ║
-║   │ · right language/script · no ids · no gendered address │                                 ║
-║   │ · "booked/cancelled" claim ⇒ must have tool result     │                                 ║
-║   │ · staff-callback promise ⇒ must create inbox item      │                                 ║
-║   │ fail → regenerate once with reason → safe fallback     │                                 ║
-║   └────────────────────────────┬───────────────────────────┘                                 ║
-╚════════════════════════════════╪═════════════════════════════════════════════════════════════╝
-                                 ▼
-             ┌────────────────────────────────────────┐        ┌───────────────────────────┐
-             │ TTS: Edge-TTS (ur-PK / en voices)      │        │ LLM layer + circuit       │
-             │ streamed sentence by sentence, filler  │        │ breaker:                  │
-             │ phrase after 0.8 s so line isn't silent│        │ Groq → Gemini → Ollama    │
-             └────────────────────┬───────────────────┘        │ every fallback logged     │
-                     MP3 over WS  ▼                            └───────────────────────────┘
-                               caller
+```mermaid
+flowchart TD
+    MIC["🎙️ Browser mic<br/>Silero VAD + noise gate"] -->|WAV over WebSocket| STT["Groq Whisper-large-v3<br/>Urdu-script guard · prompt-echo filter"]
+    CLI["⌨️ Text CLI"] --> SAFE
+    STT --> SAFE
 
-   ┌──────────────── STATE & SIDE EFFECTS ───────────────┐     ┌──────── OBSERVABILITY ────────┐
-   │ SQLite (SQLModel): doctors · slots · appointments · │     │ LangSmith: 1 trace per turn,  │
-   │ calls · turns · inbox                               │     │ per-node latency, tags; phone │
-   │        │                                            │     │ number hashed, never sent     │
-   │        ├─► Transactional OUTBOX (same commit as the │     └───────────────────────────────┘
-   │        │   booking) ─► dispatcher ─► WhatsApp Cloud │
-   │        │   API (or "simulate")                      │     ┌──────── OWNER DASHBOARD ──────┐
-   │        └─► Inbox ─► owner answers ─► 90_learned.md  │────►│ calls · outcomes · latency ·  │
-   │             ─► re-ingest (self-improving KB)        │     │ inbox · "teach Hina"          │
-   └─────────────────────────────────────────────────────┘     └───────────────────────────────┘
+    subgraph GRAPH["LangGraph: one invocation per caller turn"]
+        SAFE["🚨 Safety rules<br/>regex lexicon · 0 LLM calls"] -->|emergency| ESC["Escalate<br/>fixed 1122 message + doctor alert"]
+        SAFE --> ROUTER["🧭 Router · gpt-oss-20b<br/>route + risk + English rewrite + caller name"]
+        ROUTER -.->|in parallel| RET["Speculative retrieval<br/>Gemini embeddings · Chroma"]
+        ROUTER -->|risk = emergency| ESC
+        ROUTER --> FAQ["📚 FAQ agent<br/>grounded + citations"]
+        ROUTER --> BOOK["📅 Booking agent<br/>tool loop · phone-bound tools"]
+        ROUTER --> HAND["🙋 Handoff agent<br/>message for staff"]
+        RET --> FAQ
+        BOOK --- CHECKS["🔒 Tool-side checks<br/>confirmation gate · time must match slot<br/>real patient name · reschedule, not 2nd booking"]
+        FAQ --> GUARD["🛡️ Output guardrails<br/>leaks · script · length · ids<br/>claims need tool results · promises file inbox items"]
+        BOOK --> GUARD
+        HAND --> GUARD
+    end
 
-══════════════════════════════════ OFFLINE: CALLER SIMULATOR ARENA ══════════════════════════════════
-  personas.yaml (30) ─► Gemini plays caller ─► real graph on fresh in-memory DB per persona
-        ─► deterministic checks (DB rows, escalation, language, forbidden text)
-        ─► Gemini judge (grounded / helpful / tone + unsupported claims)
-        ─► reports/latest.md + history.jsonl ─► pytest gate: emergency recall & injection = 100%
+    LLM["⚡ LLM layer + circuit breaker<br/>Groq → Gemini → Ollama"] -.-> ROUTER
+    LLM -.-> FAQ
+    LLM -.-> BOOK
+
+    GUARD --> TTS["Edge-TTS ur-PK / en<br/>streamed per sentence + filler phrase"]
+    ESC --> TTS
+    TTS -->|MP3 over WebSocket| SPK["🔊 Caller"]
+
+    GRAPH --> DB[("SQLite<br/>slots · appointments · calls · inbox")]
+    DB --> OUTBOX["📤 Transactional outbox<br/>same commit as the booking"]
+    OUTBOX --> WA["WhatsApp Cloud API<br/>confirmations + reminders"]
+    DB --> DASH["📊 Owner dashboard"]
+    DASH -->|owner answers inbox| KB["📝 Learned KB<br/>re-ingested into Chroma"]
+    KB --> RET
+    GRAPH -.->|1 trace per turn, phone hashed| LS["🔭 LangSmith"]
+
+    subgraph ARENA["🎭 Caller Simulator Arena (offline)"]
+        PERS["30 personas"] --> SIM["Gemini plays the caller"]
+        SIM --> RUN["Real graph on a fresh in-memory DB"]
+        RUN --> CHK["Deterministic checks + Gemini judge"]
+        CHK --> GATE["Reports + pytest gate<br/>emergency recall & injection = 100%"]
+    end
 ```
+
+The same diagram in plain text, plus details on every component, is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Tech choices (and trade-offs)
 
