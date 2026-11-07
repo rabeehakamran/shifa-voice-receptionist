@@ -22,7 +22,7 @@ import statistics
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -245,6 +245,10 @@ def answer_inbox(item_id: int, body: Answer):
     """Self-improving KB: the owner answers once, it becomes a KB section, next caller gets it."""
     with _session() as s:
         item = s.get(InboxItem, item_id)
+        if item is None:
+            raise HTTPException(404, "inbox item not found")
+        if item.status == "resolved":  # idempotent: a double-click/resubmit must not append the answer twice
+            return {"ok": True, "added_to_kb": False, "already_resolved": True}
         item.answer, item.status = body.answer, "resolved"
         s.add(item)
         s.commit()

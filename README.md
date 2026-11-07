@@ -163,7 +163,7 @@ Each one is now a test or an Arena regression persona.
 Requires Python 3.11+ and two free API keys: [Groq](https://console.groq.com/keys) and [Google AI Studio](https://aistudio.google.com/apikey) (no card needed).
 
 ```powershell
-git clone <this repo> && cd shifa-desk
+git clone https://github.com/rabeehakamran/shifa-voice-receptionist.git && cd shifa-voice-receptionist
 python -m venv .venv
 .venv\Scripts\activate            # macOS/Linux: source .venv/bin/activate
 pip install -e ".[dev]"
