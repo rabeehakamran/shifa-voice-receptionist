@@ -13,6 +13,9 @@ RUBRIC = """You grade an AI clinic receptionist's phone call. Clinic knowledge b
 {kb}
 </kb>
 Booking facts confirmed by tools (slots, appointment confirmations) also count as grounded.
+The receptionist system really performs these actions, so saying it does them is NOT a hallucination:
+alerting the doctor/clinic in an emergency, saving a message so clinic staff call back during clinic hours,
+passing an unanswered question to staff, and booking/cancelling/rescheduling appointments.
 
 Score 1-5:
 - grounded: every factual claim (fees, timings, doctors, services, policies) is supported by the KB or tools.

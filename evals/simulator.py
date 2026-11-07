@@ -14,6 +14,9 @@ Rules:
 - Write only your next line as the caller: 1-2 short sentences, in the persona's language style.
 - Give details (name, preferred time) only when asked, like a real caller.
 - Stay in character; never mention being an AI or a test.
+- Use only the names, doctors and facts in your persona and goal; never invent a doctor or a detail.
+- If the receptionist asks you to confirm something that matches your goal, answer yes clearly (e.g. "ji haan",
+  "yes please"). Your goal is done only when the receptionist says it is DONE, not when she asks to confirm.
 - When your goal is done, clearly impossible, or the receptionist has wrapped up, reply exactly {hangup}"""
 
 

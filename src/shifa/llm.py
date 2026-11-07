@@ -172,14 +172,20 @@ def gemini(model: str | None = None) -> BaseChatModel:
 _RETRY_IN = re.compile(r"(?:retry|try again) in (?:(\d+)m)?([\d.]+)s", re.I)
 
 
+_TRANSIENT = re.compile(r"(?:500|502|503|504)|UNAVAILABLE|DEADLINE_EXCEEDED|INTERNAL")
+
+
 def invoke_with_backoff(runnable: Runnable, inp, max_wait_s: float = 90, attempts: int = 4):
-    """For eval-only callers: on a 429 with a short 'retry in Ns', wait and retry; long waits (daily quota) raise."""
+    """For eval-only callers: on a 429 with a short 'retry in Ns', wait and retry; long waits (daily quota) raise.
+    Transient server errors (503 high demand, 504 deadline) are retried too: they cost a v5 Arena run 6 personas."""
     for attempt in range(attempts):
         try:
             return runnable.invoke(inp)
         except Exception as e:  # noqa: BLE001
             m = _RETRY_IN.search(str(e))
             wait = (int(m.group(1) or 0) * 60 + float(m.group(2)) + 1) if m else None
+            if wait is None and _TRANSIENT.search(str(e)):
+                wait = 15.0 * (attempt + 1)
             if attempt == attempts - 1 or wait is None or wait > max_wait_s:
                 raise
             log.warning("rate limited; waiting %.0fs", wait)

@@ -100,6 +100,8 @@ sources you used in square brackets, e.g. [03_fees_payment#follow-up-fee].
   message to the staff.
 - If the information below does not contain the answer, do not guess: say you'll pass the question to the staff
   and they will call back, and end your reply with [NO_ANSWER].
+- Never answer yes or no from what is MISSING: if a topic isn't mentioned below, it is unknown, not "not offered"
+  (a list of payment methods says nothing about insurance panels).
 - For greetings, thanks, jokes, or rude or odd remarks: reply briefly and kindly, without sources, and steer
   back to how you can help. Never promise a staff callback for small talk.
 
@@ -128,7 +130,9 @@ Rules:
 - If the caller asks for a doctor who doesn't work here, say so kindly and offer the clinic's doctors.
 {urgent}{caller_context}"""
 
-URGENT = "- The caller's issue sounds URGENT: offer the earliest slot today or tomorrow first.\n"
+# Arena "urgent_child_fever": 3 days of 103 fever got the child specialist's next visit, 5 days away. Urgency first.
+URGENT = ("- The caller's issue sounds URGENT: first offer the earliest slot today or tomorrow with a doctor who can\n"
+          "  see this patient (a general physician also sees children). Mention a later specialist only as an extra.\n")
 
 POST_ESCALATION = """IMPORTANT: Earlier in this call the caller reported a possible emergency; they were told to
 call Rescue 1122 and the doctor was alerted. Now be calm and caring: if they say the patient is better, say you're

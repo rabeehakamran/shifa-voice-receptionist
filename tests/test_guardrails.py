@@ -74,3 +74,26 @@ def test_slot_numbers_flagged():
     # Verbatim from a Gemini fallback reply.
     assert problems("Sumayya, aap ka appointment kal shaam 6 baje (slot 148) confirm kar doon?", "roman_ur")
     assert problems("Kal shaam 6 baje ka slot available hai.", "roman_ur") == []  # the word "slot" alone is fine
+
+
+def test_sentence_cap_keeps_the_question():
+    # Arena "cancel": the cap kept greeting + statement and dropped the only question.
+    r = clean("Welcome back, Omar Farooq. I see you have an appointment on Wednesday at 5 PM. Shall I cancel it?")
+    assert r == "Welcome back, Omar Farooq. Shall I cancel it?"
+
+
+def test_claims_completed_action_past_tense_only():
+    from shifa.agents.guardrails import claims_completed_action as claims
+
+    assert claims("جی سمیہ، میں نے کل شام سات بجے آپ کی اپائنٹمنٹ بُک کر دی ہے۔")  # verbatim Arena reply
+    assert claims("Aapka appointment confirm ho gaya") and claims("I have booked you with Dr. Usman.")
+    assert not claims("کیا میں آپ کے لیے یہ اپائنٹمنٹ شام سات بجے کنفرم کر دوں؟")
+    assert not claims("Kya main book kar doon?") and not claims("Shall I cancel it?")
+
+
+def test_staff_followup_promise_detected():
+    from shifa.agents.guardrails import promises_staff_followup as promises
+
+    assert promises("I’m sorry, I don’t have that information. I’ll pass your question to the staff.")
+    assert promises("میں آپ کا سوال عملے کو دے دیتی ہوں")
+    assert not promises("Dr. Ayesha's fee is Rs. 2000.")

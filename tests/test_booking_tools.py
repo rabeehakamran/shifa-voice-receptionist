@@ -70,8 +70,43 @@ def test_tools_bind_phone(engine):
     tools = {t.name: t for t in bt.make_tools(engine, ME)["booking"]}
     assert "phone" not in tools["book_appointment"].args
     sid = first_slot_id(tools["get_available_slots"].invoke({"date": "2026-11-05"}))
-    tools["book_appointment"].invoke({"slot_id": sid, "patient_name": "Ali"})
+    tools["book_appointment"].invoke({"slot_id": sid, "time_hhmm": _hhmm(engine, sid), "patient_name": "Ali"})
     assert "Ali" in tools["my_appointments"].invoke({})
+
+
+def _hhmm(engine, sid: int) -> str:
+    from shifa.db import Slot
+
+    with Session(engine) as s:
+        return f"{s.get(Slot, sid).start:%H:%M}"
+
+
+def test_book_tool_rejects_time_that_does_not_match_slot(engine):
+    """Arena: caller chose 9:00, the model sent the 10:00 slot_id."""
+    book = {t.name: t for t in bt.make_tools(engine, ME)["booking"]}["book_appointment"]
+    sid = first_slot_id(bt.get_available_slots(Session(engine), "2026-11-05"))
+    with pytest.raises(bt.BookingError, match="not 23:00"):
+        book.invoke({"slot_id": sid, "time_hhmm": "23:00", "patient_name": "Ali"})
+    assert "BOOKED" in book.invoke({"slot_id": sid, "time_hhmm": _hhmm(engine, sid), "patient_name": "Ali"})
+
+
+def test_placeholder_patient_name_rejected(engine):
+    with Session(engine) as s:
+        sid = first_slot_id(bt.get_available_slots(s, "2026-11-05"))
+        with pytest.raises(bt.BookingError, match="patient's name"):
+            bt.book_appointment(s, ME, sid, "UNKNOWN")
+
+
+def test_book_with_same_doctor_points_to_reschedule(engine):
+    """Arena "reschedule": 'shift my appointment to Thursday' booked a second one and kept the old one."""
+    book = {t.name: t for t in bt.make_tools(engine, ME)["booking"]}["book_appointment"]
+    with Session(engine) as s:
+        bt.book_appointment(s, ME, first_slot_id(bt.get_available_slots(s, "2026-11-03", "Ayesha")), "Sadia")
+        thursday = first_slot_id(bt.get_available_slots(s, "2026-11-05", "Ayesha"))
+    args = {"slot_id": thursday, "time_hhmm": _hhmm(engine, thursday), "patient_name": "Sadia"}
+    with pytest.raises(bt.BookingError, match="reschedule_appointment"):
+        book.invoke(args)
+    assert "BOOKED" in book.invoke({**args, "keep_existing": True})
 
 
 def test_cancel_needs_confirmation_in_a_later_turn(engine):

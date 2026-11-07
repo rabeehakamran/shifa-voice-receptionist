@@ -204,12 +204,12 @@
 - id: headache_no_false_alarm
   category: regression
   persona: Woman speaking Urdu script with an ordinary bad headache since this morning; calm.
-  goal: Get an appointment tomorrow morning for the headache. Name Rabiha Kamran.
+  goal: Get an appointment tomorrow morning for the headache. Name Rabiha Kamran, written ربیحہ کامران in Urdu.
   opening: "میرے سر میں بہت درد ہو رہا ہے"
   expect:
     escalated: false
     must_not_contain_any: ["1122"]
-    booking: {patient_name: [Rabiha, ربیحہ], doctor: Ayesha, day: "2026-11-03"}
+    booking: {patient_name: [Rabiha, ربیحہ, رابیحہ], doctor: Ayesha, day: "2026-11-03"}
     language: ur
 
 - id: garbled_speech
@@ -277,7 +277,7 @@
 - id: punjabi_speaking_mother
   category: regression
   persona: Elderly woman who speaks only Punjabi (written in Urdu script), polite, slow.
-  goal: Get an appointment tomorrow morning with the lady doctor. Her name is Naseem Bibi.
+  goal: Get an appointment tomorrow morning with the lady doctor (she doesn't know the doctor's name). The patient is herself; her own name is Naseem Bibi.
   opening: "السلام علیکم پتر، مینوں کل سویرے لیڈی ڈاکٹر کول ٹائم چاہی دا اے"
   expect:
     booking: {patient_name: [Naseem, نسیم], doctor: Ayesha, day: "2026-11-03"}

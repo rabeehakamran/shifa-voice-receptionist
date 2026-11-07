@@ -180,19 +180,32 @@ def faq(state: CallState, config: RunnableConfig) -> dict:
         answer, cites = split_citations(guardrails.clean(model.invoke(msgs).text))
         if not guardrails.acceptable(guardrails.problems(answer, state.get("lang", "en"))):
             answer, cites = _fallback(state), []
+    valid = {h["id"] for h in hits}
+    # Arena "faq_not_in_kb": "I'll pass your question to the staff" with no [NO_ANSWER] tag, so nothing reached the
+    # inbox. The spoken promise itself counts as a gap when no KB source backs the answer.
+    if "NO_ANSWER" not in cites and not (set(cites) & valid) and guardrails.promises_staff_followup(answer):
+        cites.append("NO_ANSWER")
     # Only genuine KB gaps go to the owner's "teach Hina" inbox, not medical-advice or post-emergency turns.
     if "NO_ANSWER" in cites and state.get("risk") == "none" and not state.get("escalated"):
         with Session(_engine(config)) as s:
             s.add(InboxItem(call_id=state.get("call_id"), phone=_phone(config), kind="unanswered",
                             text=_last_user_text(state)))
             s.commit()
-    valid = {h["id"] for h in hits}
     return {"messages": [AIMessage(answer)], "citations": [c for c in cites if c in valid] or
             (["NO_ANSWER"] if "NO_ANSWER" in cites else [])}
 
 
-def _tool_loop(system: str, state: CallState, tools: list) -> list[AnyMessage]:
-    """Minimal ReAct loop. Tool errors go back to the model as messages so it can self-correct."""
+_ACTION_DONE = ("BOOKED ", "CANCELLED ", "RESCHEDULED ")
+
+
+def _action_done(msgs: list[AnyMessage]) -> bool:
+    return any(isinstance(m, ToolMessage) and str(m.content).startswith(_ACTION_DONE) for m in msgs)
+
+
+def _tool_loop(system: str, state: CallState, tools: list, on_fail=None) -> list[AnyMessage]:
+    """Minimal ReAct loop. Tool errors go back to the model as messages so it can self-correct.
+
+    on_fail: called when the loop gives up and tells the caller staff will call back, so that promise is real."""
     by_name = {t.name: t for t in tools}
     model = llm.with_tools(tools)
     history = state["messages"][-20:]
@@ -200,11 +213,22 @@ def _tool_loop(system: str, state: CallState, tools: list) -> list[AnyMessage]:
     while history and not isinstance(history[0], HumanMessage):
         history = history[1:]
     new: list[AnyMessage] = []
-    corrected = False
+    corrected = claim_checked = False
     for _ in range(MAX_TOOL_STEPS):
         ai: AIMessage = model.invoke([SystemMessage(system), *history, *new])
         if not ai.tool_calls:
             text = guardrails.clean(ai.text)
+            # Arena "asks_for_sms_reminder": "I've booked it" with no book_appointment call, so the DB was empty.
+            # A claim needs a successful tool result in this call; otherwise the model must act or retract.
+            if guardrails.claims_completed_action(text) and not _action_done(state["messages"] + new):
+                guardrails.TRIGGERS["claimed an action no tool performed"] += 1
+                if not claim_checked:
+                    claim_checked = True
+                    new.append(HumanMessage(
+                        "(system: your reply says the appointment was booked/cancelled/moved, but no tool did that. "
+                        "If the caller has confirmed, call the tool now; otherwise do not claim it is done.)"))
+                    continue
+                break  # still claiming after the retry: give the honest failure reply below
             issues = guardrails.problems(text, state.get("lang", "en"))
             if issues and not corrected:
                 # Empty reply or leaked reasoning (both seen in testing): ask once more, with the reason.
@@ -225,6 +249,8 @@ def _tool_loop(system: str, state: CallState, tools: list) -> list[AnyMessage]:
             except (BookingError, ValueError) as e:
                 result = f"Error: {e}"
             new.append(ToolMessage(str(result), tool_call_id=call["id"], name=call["name"]))
+    if on_fail:
+        on_fail()
     new = [m for m in new if not (isinstance(m, HumanMessage) and m.text.startswith("(system:"))]
     new.append(AIMessage("Maazrat, system mein masla aa raha hai. Main staff ko message de deti hoon."
                          if state.get("lang") != "en" else
@@ -250,7 +276,11 @@ def booking(state: CallState, config: RunnableConfig) -> dict:
     urgent = prompts.URGENT if state.get("risk") == "urgent" or state.get("escalated") else ""
     system = _system(state, prompts.BOOKING.format(calendar=prompts.calendar_hint(), urgent=urgent,
                                                    caller_context=""))
-    return {"messages": _tool_loop(system, state, _tools(state, config)["booking"])}
+    def on_fail():  # the failure reply promises a staff callback: leave the message it promises
+        with Session(_engine(config)) as s:
+            leave_message(s, _phone(config), state.get("call_id"),
+                          f"Booking assistant could not complete a request. Caller said: {_last_user_text(state)}")
+    return {"messages": _tool_loop(system, state, _tools(state, config)["booking"], on_fail=on_fail)}
 
 
 @timed("handoff")

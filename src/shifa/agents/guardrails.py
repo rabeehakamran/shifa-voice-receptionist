@@ -56,7 +56,41 @@ def clean(text: str) -> str:
                for k in kept):
             continue  # near-duplicate of a sentence we already have
         kept.append(sentence)
+    if len(kept) > MAX_SENTENCES and not any(_is_question(k) for k in kept[:MAX_SENTENCES]):
+        # Arena "cancel": "Welcome back, Omar. I see your appointment on Wed 5 PM. Shall I cancel it?" lost its
+        # question to the cap, so the caller was never asked anything. The question is the sentence that matters.
+        question = next((k for k in reversed(kept) if _is_question(k)), None)
+        if question:
+            return " ".join([*kept[:MAX_SENTENCES - 1], question])
     return " ".join(kept[:MAX_SENTENCES])
+
+
+def _is_question(sentence: str) -> bool:
+    return sentence.rstrip().endswith(("?", "؟"))
+
+
+# "Done" claims, past/perfect only: "book kar doon?" / "کنفرم کر دوں؟" (asking) must not match.
+_CLAIMS_DONE = re.compile(
+    r"\b(?:i(?:'ve| have)? (?:just )?(?:booked|cancell?ed|rescheduled|moved)|"
+    r"(?:is|has been|have been) (?:now )?(?:booked|cancell?ed|rescheduled)|"
+    r"(?:appointment|booking) (?:is |has been )?(?:confirmed|done))\b"
+    r"|\b(?:book|cancel|confirm|shift|reschedule)\s+(?:kar|ho)\s+(?:di|diya|dee|gaya|gayi|gai)\b"
+    r"|(?:بُک|بک|کینسل|منسوخ|کنفرم|شفٹ)\s*(?:کر\s*دی|کر\s*دیا|ہو\s*گئی|ہو\s*گیا)", re.I)
+
+# Promises that staff will follow up. Every such promise must leave something in the staff inbox.
+_PROMISES_STAFF = re.compile(
+    r"\b(?:pass (?:your|this|the) (?:question|message|query)|staff will (?:call|get back|contact)|"
+    r"(?:call|get back to) you (?:back )?(?:soon|later|during)?|staff ko (?:bata|de|pohncha|message))"
+    r"|(?:عملے|سٹاف|اسٹاف)\s*(?:کو|سے)", re.I)
+
+
+def claims_completed_action(text: str) -> bool:
+    """The reply says an appointment was booked/cancelled/moved (checked against actual tool results)."""
+    return bool(_CLAIMS_DONE.search(text))
+
+
+def promises_staff_followup(text: str) -> bool:
+    return bool(_PROMISES_STAFF.search(text))
 
 
 @traceable(name="output_guardrail", run_type="chain")

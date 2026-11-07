@@ -118,3 +118,64 @@ def test_trace_structure_and_no_raw_phone_number(engine, monkeypatch):
     # collect_runs keeps only the ROOT run (child spans go to LangSmith separately), so check what it can see.
     everything = str(root.inputs) + str(root.outputs) + str(root.extra)
     assert phone not in everything  # privacy: the number never leaves the laptop
+
+
+def _scripted_tools(monkeypatch, replies):
+    """with_tools fake that returns the scripted AIMessages in order (a callable entry gets the messages)."""
+    it = iter(replies)
+    monkeypatch.setattr(llm, "with_tools", lambda tools: RunnableLambda(
+        lambda msgs: (lambda r: r(msgs) if callable(r) else r)(next(it))))
+    monkeypatch.setattr(llm, "structured", lambda *a, **k: RunnableLambda(
+        lambda _: g.RouterDecision(route="booking")))
+
+
+def _tomorrow_slot(engine) -> int:
+    from shifa.db import Slot
+
+    with Session(engine) as s:
+        return next(sl.id for sl in s.exec(select(Slot)).all() if sl.start.date().day == 3 and not sl.is_booked)
+
+
+def _slot_time(engine, sid: int) -> str:
+    from shifa.db import Slot
+
+    with Session(engine) as s:
+        return f"{s.get(Slot, sid).start:%H:%M}"
+
+
+def test_unbacked_booking_claim_forces_the_tool_call(engine, monkeypatch):
+    """Arena "asks_for_sms_reminder": Hina said 'booked' without calling book_appointment."""
+    from shifa.db import Appointment
+
+    slot = _tomorrow_slot(engine)
+    _scripted_tools(monkeypatch, [
+        AIMessage("Your appointment is booked for tomorrow."),  # the lie: no tool call
+        AIMessage("", tool_calls=[{"name": "book_appointment", "id": "c1",
+                                   "args": {"slot_id": slot, "time_hhmm": _slot_time(engine, slot),
+                                            "patient_name": "Sumayya"}}]),
+        AIMessage("I have booked Sumayya for tomorrow."),
+    ])
+    r = CallSession("03001112222", engine=engine).turn("yes please confirm it")
+    assert "booked" in r.reply
+    with Session(engine) as s:
+        assert s.exec(select(Appointment)).one().patient_name == "Sumayya"
+
+
+def test_repeated_unbacked_claim_gives_honest_reply_and_real_callback(engine, monkeypatch):
+    _scripted_tools(monkeypatch, [AIMessage("Your appointment is booked."), AIMessage("It has been booked.")])
+    r = CallSession("03001112222", engine=engine).turn("yes please confirm it")
+    assert "booked" not in r.reply.lower() and "staff" in r.reply.lower()
+    with Session(engine) as s:  # the reply promises a callback, so a message must exist
+        assert s.exec(select(InboxItem).where(InboxItem.kind == "message")).one()
+
+
+def test_faq_staff_promise_without_tag_still_reaches_inbox(engine, monkeypatch):
+    """Arena "faq_not_in_kb": the model promised to pass the question on but forgot [NO_ANSWER]."""
+    monkeypatch.setattr(llm, "structured", lambda *a, **k: RunnableLambda(
+        lambda _: g.RouterDecision(route="faq", search_query="insurance")))
+    monkeypatch.setattr(llm, "chat", lambda *a, **k: RunnableLambda(lambda _: AIMessage(
+        "I'm sorry, I don't have that information. I'll pass your question to the staff.")))
+    r = CallSession("03001112222", engine=engine).turn("Do you accept State Life insurance?")
+    assert r.citations == ["NO_ANSWER"]
+    with Session(engine) as s:
+        assert s.exec(select(InboxItem).where(InboxItem.kind == "unanswered")).one()

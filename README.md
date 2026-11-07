@@ -87,7 +87,7 @@ flowchart TD
 
 Manual testing doesn't scale, and an LLM grading itself is biased. So:
 
-1. **24 personas** in [`evals/personas.yaml`](evals/personas.yaml), each with a persona, a hidden goal, a fixed opening line and checkable expectations: booking, FAQ, grounding (questions the KB *can't* answer), safety, security (prompt injection, dosage jailbreaks), and **regression personas: one for every real bug found in manual testing**.
+1. **30 personas** in [`evals/personas.yaml`](evals/personas.yaml), each with a persona, a hidden goal, a fixed opening line and checkable expectations: booking, FAQ, grounding (questions the KB *can't* answer), safety, security (prompt injection, dosage jailbreaks), and **regression personas: one for every real bug found in manual testing**.
 2. A **different model family** (Gemini) plays the caller, so the Groq-based agent isn't graded by itself.
 3. **Deterministic checks** inspect the fresh per-persona database and transcript: was the right appointment created, did it escalate, did any forbidden text leak, did replies match the caller's language and script, were any replies empty?
 4. An **LLM judge** scores groundedness, helpfulness and tone, and lists any unsupported claim verbatim.
@@ -100,7 +100,27 @@ python -m evals.run_evals --only cancel,budget_500   # smoke run → reports/smo
 
 ### Results
 
-> ⏳ **First full run pending.** Free-tier quotas (Gemini Flash: 20 requests/day) cut the first attempt short, and partial runs aren't reported as results. The scorecard (task success, emergency recall, injection resistance, hallucinations, p50/p95 latency) goes here after the first complete run.
+Latest full run, `v6-full-arena` (7 Nov 2026). Agent: Groq `gpt-oss-20b` (router) and `gpt-oss-120b` (answers); caller and judge: Gemini Flash-Lite.
+
+| Metric | v4 (first full run) | **v6 (after Arena-driven fixes)** |
+|---|---|---|
+| Personas evaluated | 27 of 30 | **28 of 30** |
+| Task success | 77.8% | **96.4%** (27/28) |
+| Emergency recall | 100% | **100%** |
+| False emergency escalations | 0 | **0** |
+| Prompt-injection resistance | 100% | **100%** |
+| Booking / FAQ / grounding / regression | 71 / 100 / 50 / 75% | **83 / 100 / 100 / 100%** |
+| Judge: grounded / helpful / tone (1–5) | 4.78 / 4.78 / 4.93 | **4.75 / 4.86 / 4.89** |
+| Claims the judge flagged as unsupported | 5 | **4** (see below) |
+| Agent latency p50 / p95 | 3.1 s / 21.0 s | **2.5 s / 10.7 s** |
+
+How to read it honestly:
+- **2 personas were not run** (Gemini 503/504 on the *simulator* side). They are excluded, never counted as passes.
+- **The one failure** (`booking_english_student`): the simulated caller switched to "5:00 PM theek hai" and Hina followed into Roman Urdu. That's arguably correct mirroring, but the check expects English, so it stays a failure.
+- **Of the 4 judge flags**, 2 are judge errors (a booking fact the tool confirmed, and "I'm alerting the doctor", which the system really does) and 2 are real: "the doctor will call you back" (it's the *staff* who call back). Earlier runs also caught "a lipid profile doesn't need fasting" and wrong small-talk opening hours. These are open.
+- p95 latency is inflated by free-tier rate limits (23 rate-limit fallbacks in this run), not by model time.
+
+Full per-persona results: [`reports/latest.md`](reports/latest.md); every run is appended to [`reports/history.jsonl`](reports/history.jsonl).
 
 ## ⚡ Latency: measured, from Lahore
 
@@ -139,6 +159,15 @@ Each one is now a test or an Arena regression persona.
 | Arena | Reasoning leaked into a spoken reply | → output guardrail |
 | Arena | Booked *today* instead of *kal* | Tool param named `day` → renamed to `date` |
 | Arena | Report said "9.5% success" | 18/21 personas crashed on quota and were counted as failures → infra errors are "not run" |
+| Arena | "I've booked it", with nothing in the DB | Model claimed an action it never took → any "booked/cancelled/moved" claim needs a successful tool result in the call, or the reply is rejected |
+| Arena | "I'll pass your question to staff", inbox empty | Model forgot the `[NO_ANSWER]` tag → the spoken promise itself files the question when no KB source backs the answer |
+| Arena | Caller chose 9:00, booked 10:00 | Model sent the wrong opaque slot id → `book_appointment` must also state the time, and the code rejects a mismatch |
+| Arena | Booked as "UNKNOWN", then asked the name | → placeholder patient names rejected by the tool |
+| Arena | "Shift my appointment" made a second booking | → booking with a doctor the caller already has an appointment with points the model to `reschedule_appointment` |
+| Arena | "We don't accept insurance" (KB never says) | Absence read as "no" → FAQ rule: a missing topic is unknown, not "not offered" |
+| Arena | Cancel flow never asked "shall I cancel?" | The 2-sentence cap cut the question → the cap keeps the question |
+| Arena | 103 fever for 3 days → specialist in 5 days | Specialist preferred over urgency → urgent cases get a GP today/tomorrow first |
+| Arena | Simulated callers hung up at "please confirm" | Simulator bug, not agent → callers confirm, and only hang up when the task is done |
 | Voice test | Whisper wrote Urdu in Hindi script | Urdu detected as Hindi → retry with `language="ur"`, sticky for the call |
 | Voice test | Headache → "call 1122 immediately" | Over-caution → 1122 only for listed emergency signs |
 | Voice test | "I don't have Rs 2000" → list of payment methods | Retrieval found the payment chunk → hot facts (fees, doctors) pinned in the prompt, RAG for the long tail |

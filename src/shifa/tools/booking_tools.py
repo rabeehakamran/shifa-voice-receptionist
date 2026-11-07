@@ -121,9 +121,31 @@ def _free_slot(s: Session, slot_id: int) -> tuple[Slot, Doctor]:
     return slot, s.get(Doctor, slot.doctor_id)
 
 
+_PLACEHOLDER_NAMES = {"unknown", "n/a", "na", "none", "patient", "caller", "guest", "?", "مریض", "نامعلوم"}
+
+
+def check_booking_request(s: Session, phone: str, slot_id: int, time_hhmm: str, keep_existing: bool) -> None:
+    """Checks the model's booking call against what the caller agreed to. Raises BookingError on a mismatch."""
+    slot, doc = _free_slot(s, slot_id)
+    # Arena: the caller chose 9:00 from "9:00, 9:20, 9:40" and the model sent the 10:00 slot_id. Ids are opaque to
+    # the model; the time is what it heard, so it must state it and the two must agree.
+    if f"{slot.start:%H:%M}" != time_hhmm.strip().zfill(5):
+        raise BookingError(f"slot_id {slot_id} is at {slot.start:%H:%M}, not {time_hhmm}. Use the slot_id of the "
+                           f"time the caller chose from the latest get_available_slots result.")
+    # Arena "reschedule": "move my appointment to Thursday" booked a second one and left the old one active.
+    same_doc = [(a, sl) for a, sl, d in _active_appointments(s, phone) if d.id == doc.id]
+    if same_doc and not keep_existing:
+        a, sl = same_doc[0]
+        raise BookingError(f"Nothing booked: this caller already has appointment_id={a.id} for {a.patient_name} with "
+                           f"{doc.name} on {sl.start:%a %d %b, %I:%M %p}. If they want to MOVE it, use "
+                           f"reschedule_appointment. Only if they want an additional appointment, call again with "
+                           f"keep_existing=true.")
+
+
 def book_appointment(s: Session, phone: str, slot_id: int, patient_name: str, reason: str = "") -> str:
-    if not patient_name.strip():
-        raise BookingError("patient_name is required. Ask the caller for the patient's name.")
+    if not patient_name.strip() or patient_name.strip().lower() in _PLACEHOLDER_NAMES:
+        # Arena: booked as "UNKNOWN" and only then asked "patient ka naam batayein".
+        raise BookingError("patient_name is required. Ask the caller for the patient's name before booking.")
     slot, doc = _free_slot(s, slot_id)
     for a, sl, d in _active_appointments(s, phone):
         same_patient = a.patient_name.strip().lower() == patient_name.strip().lower()
@@ -230,8 +252,11 @@ class SlotsArgs(BaseModel):
 
 class BookArgs(BaseModel):
     slot_id: int = Field(description="slot_id from get_available_slots")
+    time_hhmm: str = Field(description="The slot's start time the caller chose, HH:MM 24h, e.g. '09:00' or '19:00'")
     patient_name: str
     reason: str = Field("", description="Short reason for visit, e.g. 'fever'")
+    keep_existing: bool = Field(False, description="true only if the caller wants an ADDITIONAL appointment with a "
+                                                   "doctor they already have one with")
 
 
 class ApptArgs(BaseModel):
@@ -274,6 +299,10 @@ def make_tools(engine, phone: str, call_id: str | None = None, turn: int = 0,
                           f"{slot.start:%a %d %b, %I:%M %p}", asked_last_turn)
         return stop or reschedule_appointment(s, phone, appointment_id, new_slot_id)
 
+    def checked_book(s, phone, slot_id, time_hhmm, patient_name, reason="", keep_existing=False):
+        check_booking_request(s, phone, slot_id, time_hhmm, keep_existing)
+        return book_appointment(s, phone, slot_id, patient_name, reason)
+
     booking = [
         tool(list_doctors, NoArgs, "list_doctors", "List clinic doctors with qualifications and fees.",
              with_phone=False),
@@ -281,7 +310,7 @@ def make_tools(engine, phone: str, call_id: str | None = None, turn: int = 0,
              get_available_slots(s, date, doctor, part_of_day, around_time),
              SlotsArgs, "get_available_slots", "Free appointment slots on a date.", with_phone=False),
         tool(my_appointments, NoArgs, "my_appointments", "Upcoming appointments for THIS caller only."),
-        tool(book_appointment, BookArgs, "book_appointment",
+        tool(checked_book, BookArgs, "book_appointment",
              "Book a slot for a patient. Confirm name and slot with the caller first."),
         tool(gated_cancel, ApptArgs, "cancel_appointment",
              "Cancel one of this caller's appointments. Needs the caller's explicit confirmation."),
